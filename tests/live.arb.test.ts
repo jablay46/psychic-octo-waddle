@@ -31,14 +31,25 @@ async function setup() {
   for (const t of watchlist.tokens) {
     for (const p of t.pools) unique.set(p.address.toLowerCase(), p);
   }
-  const rpc = new WsRpcClient({ url: settings.BASE_RPC_WS });
+  const rpc = new WsRpcClient({ url: settings.BASE_RPC_WS, maxRetries: 5 });
   await rpc.open();
   const monitor = new PriceMonitor(rpc);
   await monitor.prepare([...unique.values()]);
-  const snapshot = await monitor.readOnce();
+  // The public Base node rate-limits bursts, and readOnce now throws rather
+  // than masking a total read failure as an empty market. Retry a few times so
+  // a throttle is not reported as a scanner bug.
+  let snapshot = null;
+  for (let attempt = 0; attempt < 5 && snapshot === null; attempt++) {
+    try {
+      snapshot = await monitor.readOnce();
+    } catch (err) {
+      if (attempt === 4) throw err;
+      await new Promise((r) => setTimeout(r, 3_000));
+    }
+  }
   const gasPriceWei = await rpc.gasPrice();
   rpc.close();
-  return { settings, snapshot, gasPriceWei };
+  return { settings, snapshot: snapshot!, gasPriceWei };
 }
 
 describeLive('live scanner on Base mainnet', () => {

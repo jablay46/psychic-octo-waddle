@@ -16,8 +16,10 @@ function emit(level: Level, msg: string, fields?: Record<string, unknown>): void
   const stamp = new Date().toISOString();
   const tail = fields && Object.keys(fields).length ? ` ${JSON.stringify(fields, safeReplacer)}` : '';
   const line = `${stamp} ${level.toUpperCase().padEnd(5)} ${redact(msg)}${tail}`;
-  if (level === 'error' || level === 'warn') process.stderr.write(line + '\n');
-  else process.stdout.write(line + '\n');
+  // Logs always go to stderr. stdout carries command output, and mixing the
+  // two corrupts `--json`: a single INFO line ahead of the payload makes the
+  // stream unparseable by anything downstream.
+  process.stderr.write(line + '\n');
 }
 
 /** BigInt and Error do not survive JSON.stringify without help. */

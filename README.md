@@ -5,8 +5,14 @@ listed on two or more DEXes, watches their pools in real time, and (later
 phases) executes atomically through a flashloan so no large upfront capital is
 required.
 
-**Status: Phase 1 (discovery) complete and running against Base mainnet.**
-Phases 2-6 are specified below and not yet implemented.
+**Status: Phases 1-3 complete and running against Base mainnet.**
+Phases 4-6 are specified below and not yet implemented.
+
+Phase 3 currently reports no net-profitable DEX-DEX cycle on Base: across 45
+pools and 256 enumerated cycles the spreads that exist (a few tens of bps on
+the thinner tokens) fall below the combined swap, flashloan, gas and slippage
+cost. The scanner is therefore a measurement tool at this stage, not yet a
+money-maker; Phase 4 is what would let it act when a cycle does clear.
 
 ## The problem this solves
 
@@ -204,6 +210,12 @@ Only results that are net-positive after all four are reported.
   truncation dominates and the effective price rounds to zero. The code returns
   zero rather than dividing by zero, and such a cycle is not reported. This was
   found by the live suite, not by inspection.
+- **A total read failure throws.** If every price read in a cycle fails (a
+  dropped socket, a provider rate limit), `readOnce` throws rather than
+  returning an empty snapshot. An empty snapshot is indistinguishable from a
+  healthy market with no opportunity, so returning one would print a clean
+  result for a completely broken scan. Watch mode logs the failure and tries
+  the next block.
 
 ## Setup
 
@@ -222,7 +234,7 @@ keyed endpoint (Alchemy, QuickNode) before Phase 2. `BASE_RPC_WS` defaults to
 ## Testing
 
 ```
-npm test              # 20 unit tests, no network
+npm test              # unit tests, no network
 RUN_LIVE=1 npm test   # adds the live Base integration check
 npm run typecheck
 ```
@@ -268,7 +280,7 @@ These hold for every phase and are not negotiable in review:
    possible default.
 4. **Never hardcode keys.** Secrets come from the environment, are never
    logged, and `.env` is gitignored. The logger redacts anything key-shaped
-   before it reaches stdout.
+   before it is written to stderr.
 5. **Full fee model.** Profitability accounts for both swap fees, the
    flashloan fee, gas, and slippage. A spread that does not clear all of them
    is not an opportunity.
