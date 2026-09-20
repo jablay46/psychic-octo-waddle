@@ -25,7 +25,7 @@ list. This bot discovers that list for itself and keeps it current.
 | Phase | Scope | Status |
 |-------|-------|--------|
 | 1 | Off-chain pair discovery across venues | **done** |
-| 2 | Real-time parallel price monitoring (WS) | todo |
+| 2 | Real-time parallel price monitoring (WS) | **done** |
 | 3 | Spread detection with a full fee/gas model | todo |
 | 4 | Flashloan executor contract with provider fallback | todo |
 | 5 | Off-chain to on-chain integration | todo |
@@ -77,10 +77,66 @@ Uniswap V4 among the discovered set.
 ```
 src/
   config/     dexes.ts (verified registry), env.ts (validated settings)
-  core/       types.ts, logger.ts (redacts secrets before printing)
+  core/       types.ts, logger.ts, wsrpc.ts (batched WebSocket JSON-RPC)
   discovery/  geckoterminal.ts, watchlist.ts, verifier.ts, discoverer.ts, cli.ts
-tests/        unit tests + gated live integration test
+  monitor/    amm.ts (price primitives), metadata.ts, monitor.ts, cli.ts,
+              validate-prices.ts
+tests/        unit tests + gated live integration tests
 ```
+
+## Phase 2 -- what it does
+
+`npm run monitor` reads the spot price of every watched pool once per block and
+streams snapshots:
+
+```
+npm run monitor                  # stream until Ctrl-C
+npm run monitor -- --once        # a single snapshot
+npm run monitor -- --seconds 20  # for a bounded smoke check
+npm run validate-prices          # compare every pool price to GeckoTerminal
+```
+
+Two pool families are priced differently, and both are exact:
+
+| Model | Source of price | Venues |
+|-------|-----------------|--------|
+| constant-product | `getReserves()` ratio | UniV2, Aerodrome V2 |
+| concentrated-liquidity | `sqrtPriceX96` from `slot0()` | UniV3, Slipstream |
+
+Live validation on Base:
+
+```
+$ npm run validate-prices
+  37/37 pools agree with GeckoTerminal within 3% (45/45 pools loaded, max deviation 1.34%)
+```
+
+The monitor streams a fresh snapshot every ~2s block, reading all 45 pools in a
+single batch with zero failed reads.
+
+### What live inspection changed in the design
+
+Three things were only discoverable by reading the chain, and each would have
+been a silent correctness bug:
+
+1. **UniV3 and Slipstream have different `slot0()` return arities.** UniV3
+   returns 7 words, Slipstream returns 6, and decoding one as the other throws.
+   Since `sqrtPriceX96` is the first word in both, the monitor reads that word
+   only. One selector, one call per pool.
+2. **Slipstream fees are not the tier in the pool name.** Two pools both
+   labelled "0.05%" reported 564 and 2703 ppm on chain. `fee()` is read live
+   per pool; the registry value is only a fallback for pools lacking it.
+3. **The public HTTP RPC is unusable for this.** A 45-pool metadata load failed
+   almost entirely with "over rate limit" at one call per 140ms. Everything now
+   reads over the WebSocket, batched, which also gives every pool a price at
+   the same block instead of at slightly different heights.
+
+### Price precision
+
+Prices are computed in `bigint` end to end and carried as a 1e12-scaled integer;
+JS floats are used only for display and thresholds. The concentrated-liquidity
+formula multiplies by `10^decimals(token0)` and divides by `10^decimals(token1)`
+— inverting that exponent collapses a price to 0 or expands it by ten orders of
+magnitude, which is exactly the failure the tests pin down.
 
 ## Setup
 

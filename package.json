@@ -6,7 +6,9 @@
     "discover": "tsx src/discovery/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "validate-prices": "tsx src/monitor/validate-prices.ts",
+    "monitor": "tsx src/monitor/cli.ts"
   },
   "dependencies": {
     "dotenv": "^18.0.1",
@@ -15,6 +17,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.2",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",
     "vitest": "^5.0.1"
