@@ -14,6 +14,16 @@ the thinner tokens) fall below the combined swap, flashloan, gas and slippage
 cost. The scanner is therefore a measurement tool at this stage, not yet a
 money-maker; Phase 4 is what would let it act when a cycle does clear.
 
+That conclusion was then stress-tested by removing every discretionary cost.
+Setting the slippage buffer, the flashloan premium and even gas to zero leaves
+**zero** profitable cycles, because the cycles never clear the fee screen in the
+first place: the best raw mid-price edge on the watchlist is about **-1 bps**,
+and the eye-catching dislocations (WETH ~13-26 bps, FLOCK ~10-25 bps) all cross
+at least one venue charging 30 bps. The wall is venue fees, not execution
+assumptions. Widening discovery is the only lever that changes this, and the
+public GeckoTerminal API rate-limits deep paging before the long tail is
+reachable.
+
 ## The problem this solves
 
 An earlier scanner looked for dislocations between CEX reference prices and
