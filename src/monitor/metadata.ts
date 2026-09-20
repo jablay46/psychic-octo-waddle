@@ -32,6 +32,9 @@ export const SEL = {
   slot0: toFunctionSelector(
     'function slot0() view returns (uint160 sqrtPriceX96, int24 tick)',
   ),
+  // Active in-range liquidity. Lives outside slot0 on v3-style pools and is
+  // what turns a mid-price into an execution price for a real trade size.
+  liquidity: toFunctionSelector('function liquidity() view returns (uint128)'),
 } as const;
 
 export interface LoadedPool {

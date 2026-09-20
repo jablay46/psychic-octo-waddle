@@ -26,7 +26,7 @@ list. This bot discovers that list for itself and keeps it current.
 |-------|-------|--------|
 | 1 | Off-chain pair discovery across venues | **done** |
 | 2 | Real-time parallel price monitoring (WS) | **done** |
-| 3 | Spread detection with a full fee/gas model | todo |
+| 3 | Spread detection with a full fee/gas model | **done** |
 | 4 | Flashloan executor contract with provider fallback | todo |
 | 5 | Off-chain to on-chain integration | todo |
 | 6 | Staged testing: fork, testnet, minimal mainnet | todo |
@@ -137,6 +137,73 @@ JS floats are used only for display and thresholds. The concentrated-liquidity
 formula multiplies by `10^decimals(token0)` and divides by `10^decimals(token1)`
 — inverting that exponent collapses a price to 0 or expands it by ten orders of
 magnitude, which is exactly the failure the tests pin down.
+
+## Phase 3 -- what it does
+
+`npm run scan` builds the cross-venue rate graph from one price snapshot,
+enumerates every simple arbitrage cycle, and prices each one against a real
+cost model:
+
+```
+npm run scan                            # one pass
+npm run scan -- --json                  # machine-readable
+npm run scan -- --dislocations-only     # raw spreads, ignoring costs
+npm run scan -- --watch                 # rescan on every block
+```
+
+Costs subtracted from every candidate: both pool swap fees, the flashloan
+premium, gas at the current `eth_gasPrice`, and a configurable slippage buffer.
+
+### Why the mid-price spread is not the answer
+
+A 13 bps dislocation between two WETH pools looks like free money and is not.
+Two 5 bps swap fees consume 10 bps of it, and the remaining 3 bps is smaller
+than the flashloan premium alone. The scanner reports this honestly:
+
+```
+$ npm run scan
+block 51541512  ETH $2595.04  gas 0.006 gwei  45 pools  256 cycles (256 unprofitable)
+  no net-profitable opportunity after fees, gas and slippage
+
+$ npm run scan -- --dislocations-only
+  WETH           13.2 bps  buy uniswap-v3 $2594.4472 -> sell aerodrome-slipstream $2597.8686
+  FLOCK          11.5 bps  buy aerodrome-slipstream $0.072628826 -> sell uniswap-v3 $0.072712242
+```
+
+This confirms the earlier finding by construction rather than by assertion:
+the DEX-DEX spreads that exist on Base are real but sit below the fee floor.
+
+### How a cycle is judged
+
+1. **Screen.** Compound each leg's rate after its fee. If the product does not
+   clear 1, discard -- no trade size can rescue a losing cycle.
+2. **Size.** Profit as a function of trade size is concave, because each pool's
+   marginal price impact grows with the amount. A geometric ladder of sizes
+   finds the optimum without a solver.
+3. **Simulate.** Run the exact swap through every pool at the chosen size.
+   Mid-prices are never used for the decision.
+4. **Charge.** Subtract both swap fees (inside the swap math), the flashloan
+   premium, gas, and the slippage buffer.
+
+Only results that are net-positive after all four are reported.
+
+### Correctness details that matter
+
+- **Rate scaling.** Each edge rate is a bigint at 1e18. A cycle's product is
+  therefore 1e(18 * legs)-scaled, and the break-even is exactly
+  `RATE_SCALE ** legs`. Getting the seed scale wrong by one factor makes *every*
+  cycle look profitable -- which is what a first version did, and what the
+  test suite now pins down with a case where exactly one of two rotations wins.
+- **Single-pool round trips are excluded.** They pay one pool's fee twice and
+  can never profit; leaving them in inflates the candidate count with noise.
+- **Out-of-range v3 swaps return null.** Inside the current tick range the
+  concentrated-liquidity formula is exact. Outside it, the real output depends
+  on the tick bitmap, so the trade is reported as unpricable rather than
+  extrapolated from one range and called profitable.
+- **Dust trades have no price.** Below roughly 1e-6 output units, integer
+  truncation dominates and the effective price rounds to zero. The code returns
+  zero rather than dividing by zero, and such a cycle is not reported. This was
+  found by the live suite, not by inspection.
 
 ## Setup
 

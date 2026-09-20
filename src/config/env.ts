@@ -56,6 +56,12 @@ const schema = z.object({
   SLIPPAGE_BPS: num(50),
   MAX_TRADE_USD: num(50_000),
 
+  // --- cost model (Phase 3) -----------------------------------------------
+  /** Aave V3 flashloan premium, in bps of the borrowed amount. */
+  FLASHLOAN_FEE_BPS: num(5),
+  /** Gas units budgeted for borrow -> swap -> swap -> repay. */
+  ESTIMATED_GAS_UNITS: num(400_000).pipe(z.number().int().positive()),
+
   // --- flashloan providers ------------------------------------------------
   ENABLE_BALANCER: boolFromEnv(true),
   ENABLE_MORPHO: boolFromEnv(true),

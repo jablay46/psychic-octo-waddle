@@ -5,6 +5,7 @@ import {
   constantProductPrice,
   concentratedLiquidityPrice,
   priceToNumber,
+  type RawPoolState,
 } from './amm.js';
 import { PoolMetadataLoader, SEL, type LoadedPool } from './metadata.js';
 
@@ -21,6 +22,9 @@ import { PoolMetadataLoader, SEL, type LoadedPool } from './metadata.js';
  *   - Every price carries the block it came from and the time it was read.
  *     Phase 3 must not act on a stale quote, so staleness is explicit here
  *     rather than discovered later.
+ *   - The raw state behind each price is retained, not just the ratio. A
+ *     spread calculation needs to price a real trade size, and a mid-price
+ *     alone cannot do that.
  */
 
 export interface PoolPrice {
@@ -32,6 +36,11 @@ export interface PoolPrice {
   price: bigint;
   /** Same price as a JS number, for thresholds and logging only. */
   priceNumber: number;
+  /** State needed to price an actual trade. */
+  state: RawPoolState;
+  /** Pool-side token order, so a trade can be mapped to zeroForOne. */
+  token0: { address: string; symbol: string; decimals: number };
+  token1: { address: string; symbol: string; decimals: number };
   block: number;
   readAt: number;
 }
@@ -90,18 +99,29 @@ export class PriceMonitor {
   async readOnce(): Promise<Snapshot> {
     const block = await this.rpc.blockNumber();
     const calls: Array<{ method: string; params: unknown[] }> = [];
-    const index: Array<{ pool: LoadedPool; at: number }> = [];
+    const index: Array<{ pool: LoadedPool; at: number; extra: number | null }> = [];
 
     for (const pool of this.pools) {
       const at = calls.length;
       const data = pool.meta.constantProduct ? SEL.getReserves : SEL.slot0;
       calls.push({ method: 'eth_call', params: [{ to: pool.meta.address, data }, 'latest'] });
-      index.push({ pool, at });
+      // v3-style pools need active liquidity as well as the price to size a
+      // trade; constant-product pools already carry everything in reserves.
+      let extra: number | null = null;
+      if (!pool.meta.constantProduct) {
+        extra = calls.length;
+        calls.push({
+          method: 'eth_call',
+          params: [{ to: pool.meta.address, data: SEL.liquidity }, 'latest'],
+        });
+      }
+      index.push({ pool, at, extra });
     }
 
     const results = await this.rpc.batch<string>(calls);
     const prices = new Map<string, PoolPrice>();
     const failed: string[] = [];
+    let firstFailure = '';
     const readAt = Date.now();
 
     for (const entry of index) {
@@ -109,18 +129,30 @@ export class PriceMonitor {
       const res = results[entry.at];
       if (res?.status !== 'fulfilled' || !res.value || res.value === '0x') {
         failed.push(addr);
+        if (!firstFailure && res?.status === 'rejected') {
+          firstFailure = res.reason instanceof Error ? res.reason.message : String(res.reason);
+        }
         continue;
       }
       try {
+        const m = entry.pool.meta;
         let price: bigint;
-        if (entry.pool.meta.constantProduct) {
+        let state: RawPoolState;
+        if (m.constantProduct) {
           const r0 = decodeWord(res.value);
           const r1 = decodeWord('0x' + res.value.slice(66));
-          price = constantProductPrice(r0, r1, entry.pool.meta);
+          price = constantProductPrice(r0, r1, m);
+          state = { kind: 'constant-product', reserve0: r0, reserve1: r1 };
         } else {
-          price = concentratedLiquidityPrice(decodeWord(res.value), entry.pool.meta);
+          const sqrtPriceX96 = decodeWord(res.value);
+          const liqRes = entry.extra !== null ? results[entry.extra] : null;
+          const liquidity =
+            liqRes?.status === 'fulfilled' && liqRes.value && liqRes.value !== '0x'
+              ? decodeWord(liqRes.value)
+              : 0n;
+          price = concentratedLiquidityPrice(sqrtPriceX96, m);
+          state = { kind: 'concentrated-liquidity', sqrtPriceX96, liquidity };
         }
-        const m = entry.pool.meta;
         prices.set(addr, {
           pool: addr,
           dexId: m.dexId,
@@ -128,6 +160,17 @@ export class PriceMonitor {
           feePpm: m.feePpm,
           price,
           priceNumber: priceToNumber(price),
+          state,
+          token0: {
+            address: m.token0.address,
+            symbol: m.token0.symbol,
+            decimals: m.token0.decimals,
+          },
+          token1: {
+            address: m.token1.address,
+            symbol: m.token1.symbol,
+            decimals: m.token1.decimals,
+          },
           block,
           readAt,
         });
@@ -138,6 +181,19 @@ export class PriceMonitor {
           error: err instanceof Error ? err.message : String(err),
         });
       }
+    }
+
+    if (prices.size === 0 && this.pools.length > 0) {
+      // Every read failed. Returning an empty snapshot would look, to anything
+      // downstream, exactly like a healthy market with no arbitrage -- the
+      // failure would be silently swallowed. Throw so callers skip this cycle.
+      throw new Error(
+        `all ${this.pools.length} price reads failed at block ${block}` +
+          (firstFailure ? `: ${firstFailure}` : ''),
+      );
+    }
+    if (failed.length) {
+      log.warn('some price reads failed', { block, failed: failed.length, ok: prices.size });
     }
 
     return { block, takenAt: readAt, prices, failed };

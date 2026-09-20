@@ -28,6 +28,7 @@ export interface RpcRequest {
 export interface ChainRpc {
   batch<T = unknown>(requests: RpcRequest[]): Promise<PromiseSettledResult<T>[]>;
   blockNumber(): Promise<number>;
+  gasPrice(): Promise<bigint>;
   open(): Promise<void>;
 }
 
@@ -38,6 +39,28 @@ export interface ChainRpc {
 export interface SubscriptionRpc extends ChainRpc {
   subscribeNewHeads(onHead: (head: { number: string }) => void): Promise<() => void>;
 }
+
+/**
+ * A failure worth retrying: the socket dropped, the provider throttled us, or
+ * a read timed out. Read-only calls are idempotent, so retrying is safe.
+ * Anything else (a revert, a malformed response) is not retried.
+ */
+function isTransient(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /closed|timeout|rate|throttl|ECONNRESET|EPIPE|socket|429|too many/i.test(msg);
+}
+
+/**
+ * A rate-limit rejection needs a much longer wait than a dropped socket. The
+ * public Base node allows a burst and then blocks for seconds; retrying inside
+ * that window just earns another rejection and burns the whole retry budget.
+ */
+function isRateLimited(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /rate limit|throttl|429|too many/i.test(msg);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface Pending {
   resolve: (value: unknown) => void;
@@ -52,6 +75,12 @@ export interface WsRpcOptions {
   /** Max requests per batch frame. */
   maxBatchSize?: number;
   requestTimeoutMs?: number;
+  /** Attempts per read-only call, including the first. */
+  maxRetries?: number;
+  /** Base backoff between retries; doubles each attempt. */
+  retryBaseMs?: number;
+  /** Base backoff when the provider reports a rate limit. */
+  retryRateLimitMs?: number;
 }
 
 export class WsRpcClient {
@@ -69,11 +98,17 @@ export class WsRpcClient {
   private readonly batchWindowMs: number;
   private readonly maxBatchSize: number;
   private readonly requestTimeoutMs: number;
+  private readonly maxRetries: number;
+  private readonly retryBaseMs: number;
+  private readonly retryRateLimitMs: number;
 
   constructor(private readonly options: WsRpcOptions) {
     this.batchWindowMs = options.batchWindowMs ?? 5;
     this.maxBatchSize = options.maxBatchSize ?? 100;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 15_000;
+    this.maxRetries = options.maxRetries ?? 3;
+    this.retryBaseMs = options.retryBaseMs ?? 250;
+    this.retryRateLimitMs = options.retryRateLimitMs ?? 2_000;
   }
 
   /**
@@ -205,6 +240,46 @@ export class WsRpcClient {
 
   /** Issues a single request. Batched with others queued in the same window. */
   request<T = unknown>(method: string, params: unknown[] = []): Promise<T> {
+    return this.requestWithRetry<T>(method, params, 0);
+  }
+
+  /**
+   * Retries a read-only call on a transient socket/rate-limit failure.
+   *
+   * The public Base node occasionally closes a socket mid-batch or throttles a
+   * burst. A scan that gave up on the first hiccup would produce a snapshot
+   * with holes -- and a hole in the price set is a missing cycle, or worse, a
+   * comparison against a stale number. Backoff is bounded so a scan cannot
+   * stall indefinitely.
+   */
+  private async requestWithRetry<T>(
+    method: string,
+    params: unknown[],
+    attempt: number,
+  ): Promise<T> {
+    try {
+      return await this.send<T>(method, params);
+    } catch (err) {
+      const maxAttempts = this.maxRetries;
+      if (attempt >= maxAttempts - 1 || !isTransient(err)) throw err;
+      const base = isRateLimited(err) ? this.retryRateLimitMs : this.retryBaseMs;
+      const backoff = base * 2 ** attempt;
+      // Jitter breaks the lockstep where every request in a failed batch wakes
+      // together and immediately re-triggers the same rate limit.
+      const jitter = Math.floor(Math.random() * base);
+      log.debug('retrying rpc call', {
+        method,
+        attempt: attempt + 1,
+        backoffMs: backoff + jitter,
+        rateLimited: isRateLimited(err),
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await sleep(backoff + jitter);
+      return this.requestWithRetry<T>(method, params, attempt + 1);
+    }
+  }
+
+  private send<T>(method: string, params: unknown[]): Promise<T> {
     if (this.closed) return Promise.reject(new Error('ws rpc client is closed'));
     const id = this.nextId++;
     const promise = new Promise<T>((resolve, reject) => {
@@ -237,6 +312,11 @@ export class WsRpcClient {
   async blockNumber(): Promise<number> {
     const hex = await this.request<string>('eth_blockNumber');
     return Number(hex);
+  }
+
+  async gasPrice(): Promise<bigint> {
+    const hex = await this.request<string>('eth_gasPrice');
+    return BigInt(hex);
   }
 
   /**

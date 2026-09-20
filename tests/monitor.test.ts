@@ -25,6 +25,10 @@ class FixtureRpc implements ChainRpc {
     return this.block;
   }
 
+  async gasPrice(): Promise<bigint> {
+    return 1_000_000_000n; // 1 gwei
+  }
+
   async batch<T>(requests: RpcRequest[]): Promise<PromiseSettledResult<T>[]> {
     this.calls.push(...requests);
     return requests.map((req) => {
@@ -164,18 +168,40 @@ describe('PriceMonitor', () => {
     expect(snap.prices.get(WETH_USDC_POOL)!.feePpm).toBe(564);
   });
 
-  it('reports a pool that cannot be read rather than silently dropping it', async () => {
+  it('reports a pool that cannot be read while still returning the others', async () => {
     const responses = baseResponses();
     responses.set(`${WETH_USDC_POOL}:${SEL.token0}`, '0x' + addr(WETH));
     responses.set(`${WETH_USDC_POOL}:${SEL.token1}`, '0x' + addr(USDC));
     responses.set(`${WETH_USDC_POOL}:${SEL.fee}`, '0x' + word(3000n));
-    // No slot0 fixture: the price read fails and must be recorded.
+    responses.set(`${V2_POOL}:${SEL.token0}`, '0x' + addr(WETH));
+    responses.set(`${V2_POOL}:${SEL.token1}`, '0x' + addr(USDC));
+    responses.set(`${V2_POOL}:${SEL.fee}`, '0x' + word(3000n));
+    responses.set(`${V2_POOL}:${SEL.getReserves}`, RESERVES_V2);
+    // No slot0 fixture for the v3 pool: its read fails and must be recorded,
+    // but the v2 pool in the same batch must still come back priced.
+    const rpc = new FixtureRpc(responses);
+    const monitor = new PriceMonitor(rpc);
+    await monitor.prepare([
+      candidate(WETH_USDC_POOL),
+      candidate(V2_POOL, { dexId: 'uniswap-v2', dexKind: 'uni-v2', poolModel: 'constant-product' }),
+    ]);
+    const snap = await monitor.readOnce();
+    expect(snap.prices.size).toBe(1);
+    expect(snap.prices.has(V2_POOL)).toBe(true);
+    expect(snap.failed).toContain(WETH_USDC_POOL);
+  });
+
+  it('throws when every read fails, instead of returning an empty snapshot', async () => {
+    // An empty snapshot is indistinguishable downstream from "no arbitrage":
+    // the scanner would print a clean result for a totally failed read.
+    const responses = baseResponses();
+    responses.set(`${WETH_USDC_POOL}:${SEL.token0}`, '0x' + addr(WETH));
+    responses.set(`${WETH_USDC_POOL}:${SEL.token1}`, '0x' + addr(USDC));
+    responses.set(`${WETH_USDC_POOL}:${SEL.fee}`, '0x' + word(3000n));
     const rpc = new FixtureRpc(responses);
     const monitor = new PriceMonitor(rpc);
     await monitor.prepare([candidate(WETH_USDC_POOL)]);
-    const snap = await monitor.readOnce();
-    expect(snap.prices.size).toBe(0);
-    expect(snap.failed).toContain(WETH_USDC_POOL);
+    await expect(monitor.readOnce()).rejects.toThrow(/all 1 price reads failed/);
   });
 
   it('issues exactly one price call per pool per cycle', async () => {

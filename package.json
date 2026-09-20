@@ -8,7 +8,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "validate-prices": "tsx src/monitor/validate-prices.ts",
-    "monitor": "tsx src/monitor/cli.ts"
+    "monitor": "tsx src/monitor/cli.ts",
+    "scan": "tsx src/arb/cli.ts"
   },
   "dependencies": {
     "dotenv": "^18.0.1",
