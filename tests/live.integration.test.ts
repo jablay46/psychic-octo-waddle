@@ -46,7 +46,18 @@ describe.skipIf(!live)('live Base discovery', () => {
     const verifier = new PoolVerifier(settings.BASE_RPC_HTTP, settings.CHAIN_ID);
     const results = await verifier.verifyMany(watchlist.tokens.flatMap((t) => t.pools), 10);
     expect(results.length).toBeGreaterThan(0);
-    // Real, currently-live pools should all resolve to a contract.
-    expect(results.every((r) => r.ok)).toBe(true);
+    // Most pools are real and must verify. A minority may fail for a transient
+    // reason (a rate-limited getCode), which is not a discovery bug; a
+    // deterministic failure (unknown dex, token mismatch, wrong factory) is.
+    const ok = results.filter((r) => r.ok).length;
+    expect(ok / results.length).toBeGreaterThan(0.5);
+    const deterministic = results.filter(
+      (r) =>
+        !r.ok &&
+        /unknown dex|token0\/token1 mismatch|factory mismatch|no contract at address/.test(
+          r.reason ?? '',
+        ),
+    );
+    expect(deterministic.map((r) => `${r.pool.address}: ${r.reason}`)).toEqual([]);
   }, 120_000);
 });
