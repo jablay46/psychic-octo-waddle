@@ -52,6 +52,12 @@ export interface TradedLeg {
   tickSpacing: number;
   /** Aerodrome v2 only: whether the route uses the stable curve. */
   stable: boolean;
+  /**
+   * The pool's deploying factory, when it exposes one. On venues with several
+   * CL deployments (Aerodrome Slipstream) this selects the router; elsewhere it
+   * is unused.
+   */
+  poolFactory?: `0x${string}`;
   amountIn: bigint;
   amountOut: bigint;
   impactBps: number;
@@ -120,6 +126,7 @@ function buildIndex(snapshot: Snapshot): Index {
       constantProduct: price.state.kind === 'constant-product',
       stable: price.stable,
       tickSpacing: price.tickSpacing,
+      factory: price.factory,
     });
   }
   return { pools, tokens, poolMeta };
@@ -158,6 +165,7 @@ function simulateCycle(
       feePpm: pool.feePpm,
       tickSpacing: meta.tickSpacing,
       stable: meta.stable,
+      poolFactory: meta.factory,
       amountIn: amount,
       amountOut: quote.amountOut,
       impactBps: quote.impactBps,

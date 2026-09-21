@@ -41,6 +41,14 @@ export interface PoolMeta {
    * driven from `feePpm` alone. Zero on every other venue.
    */
   tickSpacing: number;
+  /**
+   * The pool's own `factory()`, when it exposes one.
+   *
+   * Aerodrome runs two Slipstream factories and the router is bound to the
+   * factory, so this is what selects the correct router for a leg. Zero-address
+   * or absent on venues that have no factory or a single one.
+   */
+  factory?: `0x${string}`;
 }
 
 /**

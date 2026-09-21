@@ -112,6 +112,14 @@ top-N window is already aligned.
   encoding it shifts every following word and the call reverts `STF`. Keep
   `contracts/src/interfaces/IDexes.sol` at 7 fields. Recency is bounded by
   `ExecutionParams.deadline`, checked at the top of `execute`.
+- **Slipstream is NOT SwapRouter02-shaped: 8 fields, `0xa026383e`.** Its
+  `ExactInputSingleParams` is `(tokenIn, tokenOut, int24 tickSpacing, recipient,
+  uint256 deadline, amountIn, amountOutMinimum, sqrtPriceLimitX96)` -- it *keeps*
+  the `deadline` that SwapRouter02 dropped, and keys the pool on `tickSpacing`.
+  Confirmed against the deployed bytecode: `0xa026383e` is present in both
+  Slipstream routers and `0x04e45aaf` is absent from both (it is only in the
+  UniV3 SwapRouter02). Do not "unify" the two interfaces to 7 fields; that is
+  the exact bug that makes every Slipstream leg miss its selector.
 - **Aerodrome v2 legs must pass `leg.minAmountOut`, not `0`,** so the router
   cannot return less than the simulation and leave the profit check to absorb it.
 - **Provider callbacks are gated by `_inFlight`.** An attacker can call Balancer
@@ -123,6 +131,13 @@ top-N window is already aligned.
   (the README lists this as safety rule 6, so it must stay wired up).
 - Slipstream swaps key on `tickSpacing()`, not `fee()`; `PoolMeta.tickSpacing`
   exists for that reason and is 0 elsewhere.
+- **Slipstream's router is per-pool, chosen by the pool's `factory()`.**
+  Aerodrome runs two CL factories and each router serves only its own; tick
+  spacing is *not* a discriminator because both deployments have 1 and 10. The
+  pool's `factory()` is read in `metadata.ts` (only for multi-deployment
+  venues), carried through `PoolPrice -> TradedLeg.poolFactory`, and resolved by
+  `routerForPool()`. A pool whose factory is unregistered is refused rather than
+  sent to a guessed router, which would revert `NW9`.
 - **The `stable` flag is real data, not a placeholder.** Aerodrome v2 routes by
   `(tokenIn, tokenOut, stable, factory)`, so it must survive
   `PoolPrice -> buildIndex -> leg`. `buildIndex` once hardcoded `stable: false`,
@@ -143,12 +158,24 @@ Base mainnet:
   UniV2 pool (a router's `factory()` does not return itself).
 - UniV3: factory `0x33128a8fC17869897dcE68Ed026d694621f6FDfD`, router
   `0x2626664c2603336E57B271c5C0b26F421741e481`.
-- Slipstream: factory `0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A`, router
-  `0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5`. The address in third-party docs
-  (`0xf8f2eB49…`) is a dead factory: `getPool(WETH,USDC,100)` returns zero, and a
-  router bound to it (`0x698Cb2b6…`) reverts `NW9` for every pool.
+- Slipstream: **two factories, each with its own router** (verified on Base
+  mainnet via `getPool(WETH,USDC,ts)` plus the pool's own `factory()`):
+  - legacy `0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A`, tick spacings
+    {1,10,50,100}, router `0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5`
+  - new `0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef`, tick spacings {1,10,50},
+    router `0x698Cb2b6dd822994581fEa6eA4Fc755d1363A92F`
+
+  A router's own `factory()` returns the factory it was deployed against, and
+  it reverts `NW9` ("Pool does not exist") for pools of the other. The two
+  deployments *share* tick spacings 1 and 10 with different pools, so tick
+  spacing cannot disambiguate them -- the pool's `factory()` must. Both routers
+  are live; an earlier note calling `0xf8f2eB49…` "dead" was wrong, an artefact
+  of probing tick spacing 100, which only the legacy factory serves.
+
 When probing, always cross-check a pool's own `token0`/`token1`/`factory()`
-against the registry rather than trusting a single call.
+against the registry rather than trusting a single call. A `getPool` probe that
+returns zero may mean "wrong factory" *or* "right factory, tick spacing it does
+not serve" -- sweep the whole spacing set before concluding anything.
 
 ## Conventions
 - Logs to stderr; stdout is for command output only (JSON must parse).

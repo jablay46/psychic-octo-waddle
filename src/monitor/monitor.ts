@@ -41,6 +41,12 @@ export interface PoolPrice {
    * stable pair -- a different pool, or none at all.
    */
   stable: boolean;
+  /**
+   * The pool's own `factory()`, when it exposes one. Aerodrome runs two
+   * Slipstream factories whose routers are not interchangeable, so this is what
+   * selects the router for a leg. Absent on single-deployment venues.
+   */
+  factory?: `0x${string}`;
   /** token1 per token0, as a 1e12-scaled bigint. */
   price: bigint;
   /** Same price as a JS number, for thresholds and logging only. */
@@ -169,6 +175,7 @@ export class PriceMonitor {
           feePpm: m.feePpm,
           tickSpacing: m.tickSpacing,
           stable: m.stable,
+          factory: m.factory,
           price,
           priceNumber: priceToNumber(price),
           state,

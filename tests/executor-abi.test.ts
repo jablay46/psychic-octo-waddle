@@ -4,6 +4,7 @@ import { decodeFunctionData, encodeFunctionData, type Abi } from 'viem';
 import { describe, expect, it } from 'vitest';
 import { buildRequest } from '../src/arb/executor.js';
 import type { Opportunity, TradedLeg } from '../src/arb/evaluate.js';
+import { dexById, routerForPool } from '../src/config/dexes.js';
 import { loadSettings } from '../src/config/env.js';
 
 /**
@@ -165,6 +166,153 @@ describe.skipIf(abi === null)('executor ABI artifact', () => {
       'stable',
       'minAmountOut',
       'amountIn',
+    ]);
+  });
+});
+
+/**
+ * Pins the router-side selectors the contract emits, because a wrong struct
+ * shape is invisible to every other test: the call still encodes, the router
+ * just misses the selector and falls through to its fallback.
+ *
+ * Slipstream is the trap. Its router is *not* SwapRouter02-shaped -- the struct
+ * keeps a `deadline` (8 fields, `0xa026383e`) where SwapRouter02 dropped it
+ * (7 fields, `0x04e45aaf`). Verified against the deployed bytecode on Base:
+ * `0xa026383e` appears in both Slipstream routers, `0x04e45aaf` appears in
+ * neither (and only in the UniV3 SwapRouter02).
+ */
+describe('router selectors', () => {
+  it('uses the eight-field Slipstream struct, not the SwapRouter02 one', () => {
+    const slipstream = encodeFunctionData({
+      abi: [
+        {
+          type: 'function',
+          name: 'exactInputSingle',
+          stateMutability: 'payable',
+          inputs: [
+            {
+              name: 'params',
+              type: 'tuple',
+              components: [
+                { name: 'tokenIn', type: 'address' },
+                { name: 'tokenOut', type: 'address' },
+                { name: 'tickSpacing', type: 'int24' },
+                { name: 'recipient', type: 'address' },
+                { name: 'deadline', type: 'uint256' },
+                { name: 'amountIn', type: 'uint256' },
+                { name: 'amountOutMinimum', type: 'uint256' },
+                { name: 'sqrtPriceLimitX96', type: 'uint160' },
+              ],
+            },
+          ],
+          outputs: [{ name: 'amountOut', type: 'uint256' }],
+        },
+      ] as Abi,
+      functionName: 'exactInputSingle',
+      args: [
+        {
+          tokenIn: WETH as `0x${string}`,
+          tokenOut: USDC as `0x${string}`,
+          tickSpacing: 100,
+          recipient: WETH as `0x${string}`,
+          deadline: 1n,
+          amountIn: 1n,
+          amountOutMinimum: 0n,
+          sqrtPriceLimitX96: 0n,
+        },
+      ],
+    });
+    expect(slipstream.slice(0, 10)).toBe('0xa026383e');
+  });
+
+  it('uses the seven-field SwapRouter02 struct for UniV3', () => {
+    const univ3 = encodeFunctionData({
+      abi: [
+        {
+          type: 'function',
+          name: 'exactInputSingle',
+          stateMutability: 'payable',
+          inputs: [
+            {
+              name: 'params',
+              type: 'tuple',
+              components: [
+                { name: 'tokenIn', type: 'address' },
+                { name: 'tokenOut', type: 'address' },
+                { name: 'fee', type: 'uint24' },
+                { name: 'recipient', type: 'address' },
+                { name: 'amountIn', type: 'uint256' },
+                { name: 'amountOutMinimum', type: 'uint256' },
+                { name: 'sqrtPriceLimitX96', type: 'uint160' },
+              ],
+            },
+          ],
+          outputs: [{ name: 'amountOut', type: 'uint256' }],
+        },
+      ] as Abi,
+      functionName: 'exactInputSingle',
+      args: [
+        {
+          tokenIn: WETH as `0x${string}`,
+          tokenOut: USDC as `0x${string}`,
+          fee: 500,
+          recipient: WETH as `0x${string}`,
+          amountIn: 1n,
+          amountOutMinimum: 0n,
+          sqrtPriceLimitX96: 0n,
+        },
+      ],
+    });
+    expect(univ3.slice(0, 10)).toBe('0x04e45aaf');
+  });
+
+  it('binds every Slipstream pool to a router that serves its factory', () => {
+    const slipstream = dexById('aerodrome-slipstream')!;
+    for (const dep of slipstream.clFactories!) {
+      expect(routerForPool(slipstream, dep.factory)).toBe(dep.router);
+    }
+  });
+
+  /**
+   * Reads the field lists straight out of `IDexes.sol` so this fails if someone
+   * "simplifies" the two interfaces into one shape. The selector constants above
+   * are hand-written and would survive that; this will not.
+   */
+  it('declares the two router structs with their real, differing field counts', async () => {
+    const source = await readFile(
+      resolve(process.cwd(), 'contracts/src/interfaces/IDexes.sol'),
+      'utf8',
+    );
+    const structFields = (iface: string, struct: string): string[] => {
+      const start = source.indexOf(`interface ${iface}`);
+      const body = source.slice(start, source.indexOf('}', source.indexOf('exactInputSingle', start)));
+      const s = body.indexOf(`struct ${struct}`);
+      const block = body.slice(body.indexOf('{', s) + 1, body.indexOf('}', s));
+      return block
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('//'))
+        .map((l) => l.split(/\s+/)[1]!.replace(';', ''));
+    };
+
+    expect(structFields('IUniV3Router', 'ExactInputSingleParams')).toEqual([
+      'tokenIn',
+      'tokenOut',
+      'fee',
+      'recipient',
+      'amountIn',
+      'amountOutMinimum',
+      'sqrtPriceLimitX96',
+    ]);
+    expect(structFields('ISlipstreamRouter', 'ExactInputSingleParams')).toEqual([
+      'tokenIn',
+      'tokenOut',
+      'tickSpacing',
+      'recipient',
+      'deadline',
+      'amountIn',
+      'amountOutMinimum',
+      'sqrtPriceLimitX96',
     ]);
   });
 });

@@ -83,6 +83,45 @@ describe('venue mapping', () => {
     expect(out.pool).toBe('0x420DD381b31aEf6683db6B902084cB0FFECe40Da');
   });
 
+  it('picks the router bound to the pool factory on a two-deployment venue', () => {
+    // Aerodrome runs two Slipstream factories and each router only serves its
+    // own. Same tick spacing (10) exists on both, so the pool's factory() --
+    // not the tick spacing -- is the only thing that can pick the router.
+    const legacy = toContractLeg(
+      leg({
+        dexId: 'aerodrome-slipstream',
+        tickSpacing: 10,
+        poolFactory: '0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A',
+      }),
+      50,
+      1n,
+    );
+    const next = toContractLeg(
+      leg({
+        dexId: 'aerodrome-slipstream',
+        tickSpacing: 10,
+        poolFactory: '0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef',
+      }),
+      50,
+      1n,
+    );
+    expect(legacy.router).toBe('0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5');
+    expect(next.router).toBe('0x698Cb2b6dd822994581fEa6eA4Fc755d1363A92F');
+    expect(legacy.selector).toBe(next.selector);
+  });
+
+  it('refuses a pool whose factory has no registered router', () => {
+    // Guessing a router here would send the leg to a router bound to a
+    // different factory, which reverts NW9 instead of trading.
+    expect(() =>
+      toContractLeg(
+        leg({ dexId: 'aerodrome-slipstream', poolFactory: '0x00000000000000000000000000000000000000FF' }),
+        50,
+        1n,
+      ),
+    ).toThrow(UnsuitableOpportunityError);
+  });
+
   it('refuses a venue with no configured router', () => {
     expect(() => toContractLeg(leg({ dexId: 'not-a-dex' }), 50, 1n)).toThrow(
       UnsuitableOpportunityError,

@@ -9,6 +9,24 @@
 
 export type DexKind = 'uni-v3' | 'uni-v4' | 'uni-v2' | 'aero-v2' | 'aero-slipstream';
 
+/**
+ * One CL factory and the router bound to it.
+ *
+ * Aerodrome runs two Slipstream factories on Base and each router is wired to
+ * exactly one of them: a router's own `factory()` returns the factory it was
+ * deployed against, and it reverts `NW9` ("Pool does not exist") for any pool
+ * belonging to the other. A pool's `factory()` is therefore the only reliable
+ * way to pick the router -- the two deployments share tick spacings 1 and 10,
+ * so tick spacing alone cannot disambiguate them.
+ */
+export interface ClDeployment {
+  factory: `0x${string}`;
+  router: `0x${string}`;
+  /** Tick spacings this factory serves, for documentation and tests. */
+  tickSpacings: number[];
+  label: string;
+}
+
 /** How to read a pool's price and fee, per AMM family. */
 export type PoolModel = 'constant-product' | 'concentrated-liquidity';
 
@@ -59,6 +77,16 @@ export interface DexConfig {
   dexscreener?: DexScreenerIds;
   /** Router used to execute a swap leg on this venue (Phase 4/5). */
   router?: `0x${string}`;
+  /**
+   * Every CL factory this venue runs, with the router bound to each.
+   *
+   * A concentrated-liquidity venue may be deployed more than once (Aerodrome
+   * runs two Slipstream factories), and the router is not interchangeable
+   * between deployments. When set, `factory`/`router` are ignored for
+   * execution: the pool's own `factory()` picks the router. The verifier also
+   * accepts a pool belonging to *any* listed factory.
+   */
+  clFactories?: ClDeployment[];
   /** Whether Phase 2 can compute an exact on-chain price from reserves. */
   reservesReadable: boolean;
 }
@@ -94,12 +122,32 @@ export const BASE_DEXES: DexConfig[] = [
     // Slipstream fee tiers are per-pool (tick spacing based). Treated as a
     // flag until Phase 2 reads the pool's own fee.
     feeBps: 5,
-    // Canonical Slipstream CL factory. Verified on Base mainnet:
-    // `getPool(WETH, USDC, 100)` returns 0xb2cc224c…, the deepest CL pool, and
-    // that pool reports this exact address from `factory()`. The address
-    // circulating in third-party docs (0xf8f2eB49…) returns the zero address
-    // for the same call and is not the live factory.
+    // Aerodrome runs TWO Slipstream CL factories on Base, each with its own
+    // router. Verified on Base mainnet (getPool(WETH,USDC,ts) + the pool's own
+    // factory()/tickSpacing()):
+    //
+    //   legacy 0x5e7BB104…  ts {1,10,50,100}  router 0xBE6D8f0d…
+    //   new    0xf8f2eB49…  ts {1,10,50}      router 0x698Cb2b6…
+    //
+    // Both are live and both serve tick spacings 1 and 10 with *different*
+    // pools, so tick spacing alone cannot tell them apart -- the pool's
+    // `factory()` must. Each router reports its own factory and reverts NW9
+    // for pools of the other, which is why one shared router is wrong.
     factory: '0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A',
+    clFactories: [
+      {
+        label: 'legacy',
+        factory: '0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A',
+        router: '0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5',
+        tickSpacings: [1, 10, 50, 100],
+      },
+      {
+        label: 'new',
+        factory: '0xf8f2eB4940CFE7d13603DDDD87f123820Fc061Ef',
+        router: '0x698Cb2b6dd822994581fEa6eA4Fc755d1363A92F',
+        tickSpacings: [1, 10, 50],
+      },
+    ],
     // The deployment named "Aerodrome Base Full" indexes Slipstream CL pools
     // (its top row resolves on-chain to tickSpacing 100 / fee 624 ppm, and its
     // CL factory), so it maps here rather than to the v2 AMM despite the name.
@@ -107,11 +155,8 @@ export const BASE_DEXES: DexConfig[] = [
     subgraphId: 'GENunSHWLBXm59mBSgPzQ8metBEp9YDfdqwFr91Av1UM',
     subgraphSchema: 'v3-style',
     dexscreener: { dexIds: ['aerodrome'], labels: ['slipstream'] },
-    // Verified on a Base fork: this is the only router whose
-    // `exactInputSingle` succeeds against the live CL pools. The other
-    // candidate address (0x698Cb2b6…) shares the ABI and reverts with NW9
-    // ("Pool does not exist") for every pool, i.e. it is bound to the dead
-    // 0xf8f2eB49… factory.
+    // Only the legacy router is kept here as a display/default value; execution
+    // picks the router from the pool's `factory()` via `clFactories` above.
     router: '0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5',
     reservesReadable: false,
   },
@@ -173,6 +218,39 @@ export function dexByGeckoId(geckoId: string): DexConfig | undefined {
 
 export function dexById(id: string): DexConfig | undefined {
   return BASE_DEXES.find((d) => d.id === id);
+}
+
+/**
+ * Every factory a venue accepts, whether from `clFactories` or the single
+ * `factory` field. The verifier uses this so a pool belonging to any live
+ * deployment of a multi-factory venue passes instead of being rejected as a
+ * mismatch.
+ */
+export function venueFactories(dex: DexConfig): `0x${string}`[] {
+  if (dex.clFactories?.length) return dex.clFactories.map((d) => d.factory);
+  return dex.factory ? [dex.factory] : [];
+}
+
+/**
+ * Resolves the router to execute a swap on, given the pool's own on-chain
+ * `factory()`. Falls back to the venue's default router when the pool's factory
+ * is unknown, so a venue with a single deployment keeps working unchanged.
+ *
+ * Returns null when the venue has no executable router at all.
+ */
+export function routerForPool(dex: DexConfig, poolFactory?: string): `0x${string}` | null {
+  if (dex.clFactories?.length) {
+    if (poolFactory) {
+      const want = poolFactory.toLowerCase();
+      const match = dex.clFactories.find((d) => d.factory.toLowerCase() === want);
+      if (match) return match.router;
+      // A factory we do not know cannot be routed: its router is a different
+      // contract, and guessing would send the leg to a router that reverts.
+      return null;
+    }
+    return null;
+  }
+  return dex.router ?? null;
 }
 
 /** Venues with a deployed subgraph, i.e. those discovery can query directly. */
