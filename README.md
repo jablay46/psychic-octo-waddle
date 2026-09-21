@@ -197,7 +197,9 @@ $ npm run scan -- --dislocations-only
 ```
 
 This confirms the earlier finding by construction rather than by assertion:
-the DEX-DEX spreads that exist on Base are real but sit below the fee floor.
+the DEX-DEX spreads that exist on Base are real, but at this liquidity tier the
+pools are already priced to within about a basis point, so there is no raw edge
+left for the trade to capture.
 
 ### How a cycle is judged
 

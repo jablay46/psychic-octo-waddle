@@ -6,7 +6,7 @@ Phases 1-4 are built: off-chain pool discovery, real-time price monitoring over
 WebSocket RPC, cross-venue spread detection with a full cost model, and a
 flashloan executor that the scanner can dry-run against.
 
-Phase 4 is complete but *inert on the current watchlist* -- see the fee floor
+Phase 4 is complete but *inert on the current watchlist* -- see "no raw edge"
 below. It is verified working on dislocated state, not on live opportunity.
 
 ## Commands
