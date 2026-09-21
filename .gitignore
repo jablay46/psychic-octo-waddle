@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# secrets -- must never be committed
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# generated state
+state/
+dist/
+coverage/
+
+# foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/
