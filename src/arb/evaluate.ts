@@ -41,8 +41,17 @@ export interface TradedLeg {
   dexId: string;
   fromSymbol: string;
   toSymbol: string;
+  /** Sold token, lowercased address. */
+  tokenIn: string;
+  /** Bought token, lowercased address. */
+  tokenOut: string;
   zeroForOne: boolean;
+  /** Venue fee in 1e-6 units; also the UniV3 pool selector on a swap call. */
   feePpm: number;
+  /** Slipstream tick spacing; 0 elsewhere. Slipstream swaps key on this. */
+  tickSpacing: number;
+  /** Aerodrome v2 only: whether the route uses the stable curve. */
+  stable: boolean;
   amountIn: bigint;
   amountOut: bigint;
   impactBps: number;
@@ -110,6 +119,7 @@ function buildIndex(snapshot: Snapshot): Index {
       feePpm: price.feePpm,
       constantProduct: price.state.kind === 'constant-product',
       stable: false,
+      tickSpacing: price.tickSpacing,
     });
   }
   return { pools, tokens, poolMeta };
@@ -142,8 +152,12 @@ function simulateCycle(
       dexId: leg.dexId,
       fromSymbol: leg.from === pool.token0.address.toLowerCase() ? pool.token0.symbol : pool.token1.symbol,
       toSymbol: leg.to === pool.token1.address.toLowerCase() ? pool.token1.symbol : pool.token0.symbol,
+      tokenIn: leg.from,
+      tokenOut: leg.to,
       zeroForOne: leg.zeroForOne,
       feePpm: pool.feePpm,
+      tickSpacing: meta.tickSpacing,
+      stable: meta.stable,
       amountIn: amount,
       amountOut: quote.amountOut,
       impactBps: quote.impactBps,

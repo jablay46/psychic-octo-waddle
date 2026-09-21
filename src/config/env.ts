@@ -110,7 +110,7 @@ const schema = z.object({
       message: 'EXECUTOR_ADDRESS must be a 0x-prefixed 20-byte address',
     }),
   /** Executor ABI, relative to the working directory. */
-  EXECUTOR_ABI_PATH: z.string().default('contracts/out/FlashloanExecutor.sol/FlashloanExecutor.json'),
+  EXECUTOR_ABI_PATH: z.string().default('contracts/abi/FlashloanExecutor.json'),
   /** Slippage ceiling passed to the contract, in bps of the quoted output. */
   MAX_SLIPPAGE_BPS: num(50).pipe(z.number().int().min(0).max(2_000)),
   /** Deadline budget for an execution attempt, in seconds from submission. */

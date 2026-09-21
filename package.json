@@ -9,7 +9,10 @@
     "test:watch": "vitest",
     "validate-prices": "tsx src/monitor/validate-prices.ts",
     "monitor": "tsx src/monitor/cli.ts",
-    "scan": "tsx src/arb/cli.ts"
+    "scan": "tsx src/arb/cli.ts",
+    "build:contracts": "cd contracts && forge build",
+    "test:contracts": "cd contracts && forge test",
+    "build:abi": "cd contracts && forge inspect --json src/FlashloanExecutor.sol:FlashloanExecutor abi > abi/FlashloanExecutor.json"
   },
   "dependencies": {
     "dotenv": "^18.0.1",

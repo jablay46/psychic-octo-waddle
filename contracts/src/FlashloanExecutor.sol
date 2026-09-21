@@ -128,6 +128,9 @@ contract FlashloanExecutor {
     error LegFailed(uint256 index, bytes reason);
     error NoLegs();
     error BadLeg();
+    error TransferFailed();
+    error ApproveFailed();
+    error ZeroAddress();
 
     event Executed(
         Provider indexed provider,
@@ -149,6 +152,11 @@ contract FlashloanExecutor {
         _locked = 1;
     }
 
+    /// @dev A zero `profitRecipient_` is not an error: it means "send profit to
+    /// the deployer", which the tests and the deploy script both rely on. The
+    /// value is fixed here and can never be changed, so a compromised owner
+    /// cannot redirect realised profit.
+    // forge-lint: disable-next-line(missing-zero-check)
     constructor(address profitRecipient_) {
         owner = msg.sender;
         profitRecipient = profitRecipient_ == address(0) ? msg.sender : profitRecipient_;
@@ -156,7 +164,7 @@ contract FlashloanExecutor {
 
     /// @notice Borrows, runs the legs, repays and forwards any profit.
     /// @dev Reverts unless the cycle clears `minProfitAtomic`. See note 2.
-    function execute(ExecutionParams calldata params) external onlyOwner nonReentrant {
+    function execute(ExecutionParams calldata params) external nonReentrant onlyOwner {
         if (params.deadline < block.timestamp) revert DeadlinePassed();
         if (params.legs.length == 0) revert NoLegs();
 
@@ -246,9 +254,12 @@ contract FlashloanExecutor {
         uint256 balance = IERC20(leg.tokenIn).balanceOf(address(this));
         uint256 amountIn = leg.amountIn == type(uint256).max ? balance : leg.amountIn;
         if (amountIn == 0 || amountIn > balance) revert BadLeg();
+        // A tick spacing wider than int24 would truncate into a different,
+        // valid-looking pool. Real spacing is a few hundred at most.
+        if (leg.venue == VenueKind.Slipstream && leg.selector > 8_388_607) revert BadLeg();
 
         if (leg.venue == VenueKind.UniV3) {
-            IERC20(leg.tokenIn).approve(leg.router, amountIn);
+            _approve(leg.tokenIn, leg.router, amountIn);
             IUniV3Router.ExactInputSingleParams memory q = IUniV3Router.ExactInputSingleParams({
                 tokenIn: leg.tokenIn,
                 tokenOut: leg.tokenOut,
@@ -261,11 +272,12 @@ contract FlashloanExecutor {
             });
             _call(leg.router, abi.encodeWithSelector(IUniV3Router.exactInputSingle.selector, q), index);
         } else if (leg.venue == VenueKind.Slipstream) {
-            IERC20(leg.tokenIn).approve(leg.router, amountIn);
+            _approve(leg.tokenIn, leg.router, amountIn);
             ISlipstreamRouter.ExactInputSingleParams memory q = ISlipstreamRouter.ExactInputSingleParams({
                 tokenIn: leg.tokenIn,
                 tokenOut: leg.tokenOut,
-                tickSpacing: int24(uint24(leg.selector)),
+                // Bounded by the BadLeg check above, so this cannot truncate.
+                tickSpacing: int24(uint24(leg.selector)), // forge-lint: disable-next-line(unsafe-typecast)
                 recipient: address(this),
                 deadline: _params.deadline,
                 amountIn: amountIn,
@@ -274,7 +286,7 @@ contract FlashloanExecutor {
             });
             _call(leg.router, abi.encodeWithSelector(ISlipstreamRouter.exactInputSingle.selector, q), index);
         } else if (leg.venue == VenueKind.UniV2) {
-            IERC20(leg.tokenIn).approve(leg.router, amountIn);
+            _approve(leg.tokenIn, leg.router, amountIn);
             address[] memory path = new address[](2);
             path[0] = leg.tokenIn;
             path[1] = leg.tokenOut;
@@ -291,7 +303,7 @@ contract FlashloanExecutor {
                 index
             );
         } else if (leg.venue == VenueKind.AerodromeV2) {
-            IERC20(leg.tokenIn).approve(leg.router, amountIn);
+            _approve(leg.tokenIn, leg.router, amountIn);
             IAerodromeRouter.Route[] memory routes = new IAerodromeRouter.Route[](1);
             routes[0] = IAerodromeRouter.Route({
                 from: leg.tokenIn,
@@ -349,13 +361,16 @@ contract FlashloanExecutor {
         }
 
         uint256 profit = balance - owed;
+        // All three tokens on the watchlist return a bool and no provider is a
+        // fee-on-transfer token, so a false return must be treated as failure
+        // rather than ignored.
         if (_params.provider == Provider.Balancer) {
-            IERC20(token).transfer(address(BALANCER_VAULT), owed);
+            _transfer(token, address(BALANCER_VAULT), owed);
         } else {
-            IERC20(token).approve(_providerAddress(), owed);
+            _approve(token, _providerAddress(), owed);
         }
         if (profit > 0) {
-            IERC20(token).transfer(profitRecipient, profit);
+            _transfer(token, profitRecipient, profit);
         }
         emit Executed(_params.provider, token, _params.borrowAmount, profit, profitRecipient);
     }
@@ -369,7 +384,23 @@ contract FlashloanExecutor {
 
     /// @notice Rescues tokens sent here by mistake. Only the owner, and only
     /// tokens this contract does not need mid-flight, which the lock enforces.
-    function sweep(address token, uint256 amount) external onlyOwner nonReentrant {
-        IERC20(token).transfer(owner, amount);
+    function sweep(address token, uint256 amount) external nonReentrant onlyOwner {
+        _transfer(token, owner, amount);
+    }
+
+    /// @dev ERC20 transfers can return false instead of reverting; checking the
+    /// return value is the only way to notice a silent failure.
+    function _transfer(address token, address to, uint256 amount) internal {
+        (bool ok, bytes memory ret) = token.call(
+            abi.encodeWithSelector(IERC20.transfer.selector, to, amount)
+        );
+        if (!ok || (ret.length != 0 && !abi.decode(ret, (bool)))) revert TransferFailed();
+    }
+
+    function _approve(address token, address spender, uint256 amount) internal {
+        (bool ok, bytes memory ret) = token.call(
+            abi.encodeWithSelector(IERC20.approve.selector, spender, amount)
+        );
+        if (!ok || (ret.length != 0 && !abi.decode(ret, (bool)))) revert ApproveFailed();
     }
 }

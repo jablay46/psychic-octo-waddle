@@ -30,6 +30,7 @@ function cpPool(
     pool: address,
     dexId,
     pair: 'WETH/USDC',
+    tickSpacing: 0,
     feePpm,
     price,
     priceNumber: Number(price) / 1e12,

@@ -21,6 +21,7 @@ function meta(over: Partial<PoolMeta> = {}): PoolMeta {
     feePpm: 3000,
     constantProduct: false,
     stable: false,
+    tickSpacing: 0,
     ...over,
   };
 }

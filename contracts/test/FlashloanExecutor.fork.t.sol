@@ -46,8 +46,14 @@ contract FlashloanExecutorForkTest is Test {
     FlashloanExecutor executor;
     address profitRecipient = address(0xBEEF);
 
+    /// @dev Captured once. Reading `block.timestamp` after `vm.revertToState`
+    /// would make the same test produce different packed reserves depending on
+    /// how many snapshots preceded it.
+    uint256 forkTimestamp;
+
     function setUp() public {
         vm.createSelectFork(vm.envOr("BASE_RPC_HTTP", string("https://mainnet.base.org")));
+        forkTimestamp = block.timestamp;
         executor = new FlashloanExecutor(profitRecipient);
         assertEq(executor.owner(), address(this), "owner should be the test");
     }
@@ -73,8 +79,7 @@ contract FlashloanExecutorForkTest is Test {
     function _dislocatePairBelowSpot() internal {
         (uint112 r0,) = _readReserves(UNI_V2_POOL);
         uint256 newUsdcReserve = 620_000e6;
-        bytes32 packed =
-            bytes32((uint256(r0) << 0) | (newUsdcReserve << 112) | (uint256(block.timestamp) << 224));
+        bytes32 packed = bytes32((uint256(r0) << 0) | (newUsdcReserve << 112) | (forkTimestamp << 224));
         vm.store(UNI_V2_POOL, bytes32(uint256(8)), packed);
     }
 
@@ -114,7 +119,7 @@ contract FlashloanExecutorForkTest is Test {
             borrowAmount: borrowAmount,
             minProfitAtomic: minProfitAtomic,
             legs: _legs(borrowAmount),
-            deadline: block.timestamp + 300
+            deadline: forkTimestamp + 300
         });
     }
 
@@ -162,7 +167,7 @@ contract FlashloanExecutorForkTest is Test {
     function test_revertsOnExpiredDeadline() public {
         _fundPrincipal(1e14);
         ExecutionParams memory p = _params(1e14, 1);
-        p.deadline = block.timestamp - 1;
+        p.deadline = forkTimestamp - 1;
         vm.expectRevert(FlashloanExecutor.DeadlinePassed.selector);
         executor.execute(p);
     }
@@ -181,6 +186,27 @@ contract FlashloanExecutorForkTest is Test {
         // UniV4 has a different router; the executor must refuse rather than
         // emit a malformed call.
         p.legs[1].venue = VenueKind.UniV4;
+        vm.expectRevert(FlashloanExecutor.BadLeg.selector);
+        executor.execute(p);
+    }
+
+    /// @notice A tick spacing the int24 field cannot hold must be refused, not
+    /// silently truncated into a different pool's selector.
+    function test_revertsOnOversizedTickSpacing() public {
+        _fundPrincipal(1e14);
+        ExecutionParams memory p = _params(1e14, 1);
+        p.legs[1].venue = VenueKind.Slipstream;
+        p.legs[1].selector = 8_388_608; // int24 max + 1
+        vm.expectRevert(FlashloanExecutor.BadLeg.selector);
+        executor.execute(p);
+    }
+
+    /// @notice A leg whose declared input exceeds the contract's balance is
+    /// refused rather than silently swapping less.
+    function test_revertsWhenLegAmountInExceedsBalance() public {
+        _fundPrincipal(1e14);
+        ExecutionParams memory p = _params(1e14, 1);
+        p.legs[0].amountIn = 1e30;
         vm.expectRevert(FlashloanExecutor.BadLeg.selector);
         executor.execute(p);
     }
