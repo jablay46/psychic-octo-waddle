@@ -29,9 +29,10 @@ bps, and the cheap ones are on the *same* pairs. USDC has a slipstream pool at
 from exactly those cheap pools, and still returns about -1 bps before any cost.
 The honest reading is that pool mids on these venues are already aligned to
 within a basis point at this liquidity tier, so there is no raw edge to spend
-fees on. Widening discovery to thinner tokens is the one untested lever, and
-the public GeckoTerminal API rate-limits deep paging before the long tail is
-reachable.
+fees on. Widening discovery to thinner tokens is the one untested lever; Phase 1
+has since moved off the GeckoTerminal feed (which rate-limited deep paging) onto
+venue subgraphs with DexScreener as a keyless fallback, so the long tail is now
+reachable, but whether it holds an edge has not been measured.
 
 ## The problem this solves
 
@@ -196,7 +197,9 @@ $ npm run scan -- --dislocations-only
 ```
 
 This confirms the earlier finding by construction rather than by assertion:
-the DEX-DEX spreads that exist on Base are real but sit below the fee floor.
+the DEX-DEX spreads that exist on Base are real, but at this liquidity tier the
+pools are already priced to within about a basis point, so there is no raw edge
+left for the trade to capture.
 
 ### How a cycle is judged
 

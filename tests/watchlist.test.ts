@@ -30,7 +30,7 @@ function pool(over: Partial<PoolCandidate> = {}): PoolCandidate {
     volume24hUsd: 500_000,
     basePriceUsd: 2600,
     quotePriceUsd: 1,
-    source: 'geckoterminal',
+    source: 'subgraph',
     ...over,
   };
 }

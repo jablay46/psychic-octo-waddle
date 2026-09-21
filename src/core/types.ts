@@ -28,7 +28,12 @@ export interface PoolCandidate {
   /** Spot price of the quote token in USD, as reported by the source. */
   quotePriceUsd: number;
   /** Where the row came from, for auditing. */
-  source: 'geckoterminal' | 'factory' | 'dexscreener';
+  source: 'subgraph' | 'geckoterminal' | 'factory' | 'dexscreener';
+  /**
+   * True when a second, independent indexer (DexScreener) knows this exact
+   * pool address. Absent on fallback rows and when cross-checking is disabled.
+   */
+  crossChecked?: boolean;
 }
 
 /** One token that trades on two or more venues, with the pools that carry it. */
@@ -58,6 +63,12 @@ export interface Watchlist {
     tokensAcrossMultipleDexes: number;
     /** Tokens rejected because every pool was below the liquidity floor. */
     rejectedThinPools: number;
+    /** Rows contributed by each discovery source, for auditing a refresh. */
+    bySource?: Record<string, number>;
+    /** Rows confirmed by a second indexer (DexScreener). */
+    crossChecked?: number;
+    /** Pools discovered from a fallback source because a subgraph failed. */
+    fallbackPools?: number;
   };
   tokens: WatchToken[];
 }

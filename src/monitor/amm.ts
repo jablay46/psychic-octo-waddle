@@ -35,6 +35,12 @@ export interface PoolMeta {
   constantProduct: boolean;
   /** Aerodrome V2 stable pools use the stable curve, not x*y=k. */
   stable: boolean;
+  /**
+   * Slipstream's pool selector, read from the pool's `tickSpacing()`. A
+   * Slipstream swap call takes spacing, not a fee, so the executor cannot be
+   * driven from `feePpm` alone. Zero on every other venue.
+   */
+  tickSpacing: number;
 }
 
 /**

@@ -47,6 +47,40 @@ const schema = z.object({
   DISCOVERY_REFRESH_MS: num(300_000).pipe(z.number().int().min(5_000)),
   WATCHLIST_PATH: z.string().default('state/watchlist.json'),
 
+  // --- discovery sources --------------------------------------------------
+  /**
+   * The Graph gateway API key. Primary discovery source; without it the
+   * subgraph leg is skipped and discovery falls back to DexScreener alone.
+   * Never logged -- `redact` strips it from any URL that reaches a log line.
+   */
+  GRAPH_API_KEY: z.string().optional(),
+  /** Pages of 1000 pools to pull per venue from each subgraph. */
+  SUBGRAPH_PAGES_PER_DEX: num(4).pipe(z.number().int().min(1).max(20)),
+  /**
+   * Ceiling on a subgraph row's USD liquidity. Rows above it are treated as
+   * unindexed (liquidity 0) because a token price the subgraph never resolved
+   * inflates the figure by orders of magnitude. The deepest genuine Base pool
+   * is around $70M, so the default leaves ample headroom.
+   */
+  SUBGRAPH_MAX_LIQUIDITY_USD: num(1_000_000_000).pipe(z.number().positive()),
+  /** Optional override for the subgraph gateway host (self-hosted gateway). */
+  GRAPH_GATEWAY_URL: z.string().url().default('https://gateway.thegraph.com/api'),
+  /** DexScreener base URL, kept configurable for tests and mirrors. */
+  DEXSCREENER_API_URL: z.string().url().default('https://api.dexscreener.com'),
+  /**
+   * DexScreener is a lower-rate-limit public API, so it is used as a
+   * cross-check and fallback rather than the primary source. 340ms between
+   * calls is ~176/min, a comfortable margin under the documented ~300/min.
+   */
+  DEXSCREENER_MIN_INTERVAL_MS: num(340).pipe(z.number().int().min(0)),
+  /**
+   * When true, every subgraph row must also appear in DexScreener (matched by
+   * pool address) or it is dropped. Off by default: DexScreener covers a
+   * subset of pools, so strict agreement would discard long-tail venues the
+   * subgraph legitimately indexes.
+   */
+  REQUIRE_DEXSCREENER_AGREEMENT: boolFromEnv(false),
+
   // --- safety / execution -------------------------------------------------
   DRY_RUN: dryRunFromEnv,
   MAX_GAS_PRICE_GWEI: num(50),
@@ -66,6 +100,31 @@ const schema = z.object({
   ENABLE_BALANCER: boolFromEnv(true),
   ENABLE_MORPHO: boolFromEnv(true),
   ENABLE_AAVE: boolFromEnv(true),
+
+  // --- executor contract (Phase 4/5) --------------------------------------
+  /** Deployed FlashloanExecutor address. Absent in static-call mode. */
+  EXECUTOR_ADDRESS: z
+    .string()
+    .optional()
+    .refine((v) => v === undefined || v === '' || /^0x[0-9a-fA-F]{40}$/.test(v), {
+      message: 'EXECUTOR_ADDRESS must be a 0x-prefixed 20-byte address',
+    }),
+  /** Executor ABI, relative to the working directory. */
+  EXECUTOR_ABI_PATH: z.string().default('contracts/abi/FlashloanExecutor.json'),
+  /** Slippage ceiling passed to the contract, in bps of the quoted output. */
+  MAX_SLIPPAGE_BPS: num(50).pipe(z.number().int().min(0).max(2_000)),
+  /** Deadline budget for an execution attempt, in seconds from submission. */
+  DEADLINE_SECONDS: num(60).pipe(z.number().int().min(5)),
+  /**
+   * Where the executor sends profit. Defaults to the signer address, so a
+   * misconfigured or absent value cannot route profit to a third party.
+   */
+  PROFIT_RECIPIENT: z
+    .string()
+    .optional()
+    .refine((v) => v === undefined || v === '' || /^0x[0-9a-fA-F]{40}$/.test(v), {
+      message: 'PROFIT_RECIPIENT must be a 0x-prefixed 20-byte address',
+    }),
 
   // --- secrets (never logged, never committed) ----------------------------
   PRIVATE_KEY: z
@@ -111,9 +170,16 @@ export function resetSettingsCache(): void {
 
 /**
  * Redacts anything key-shaped before it can reach a log line.
+ *
+ * The subgraph gateway embeds its key as a path segment
+ * (`/api/<key>/subgraphs/id/<id>`), so a URL alone would leak it. The Graph
+ * keys are 32 hex characters, which rules out a generic "any hex run" rule
+ * (that would mangle pool addresses), so they are matched positionally.
  */
 export function redact(value: string): string {
   return value
     .replace(/0x[0-9a-fA-F]{64}/g, '0x<redacted-64>')
-    .replace(/([?&](?:api[-_]?key|token)=)[^&\s]+/gi, '$1<redacted>');
+    .replace(/\/(api|v1\/api)\/([0-9a-fA-F]{32})(\/|$)/g, '/$1/<redacted-graph-key>$3')
+    .replace(/([?&](?:api[-_]?key|token|access[-_]?token|deploy[-_]?key)=)[^&\s]+/gi, '$1<redacted>')
+    .replace(/\b(Authorization:\s*Bearer\s+)\S+/gi, '$1<redacted>');
 }

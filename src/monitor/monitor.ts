@@ -32,6 +32,8 @@ export interface PoolPrice {
   dexId: string;
   pair: string;
   feePpm: number;
+  /** Slipstream tick spacing; 0 elsewhere. Needed to build a swap leg. */
+  tickSpacing: number;
   /** token1 per token0, as a 1e12-scaled bigint. */
   price: bigint;
   /** Same price as a JS number, for thresholds and logging only. */
@@ -158,6 +160,7 @@ export class PriceMonitor {
           dexId: m.dexId,
           pair: `${m.token0.symbol}/${m.token1.symbol}`,
           feePpm: m.feePpm,
+          tickSpacing: m.tickSpacing,
           price,
           priceNumber: priceToNumber(price),
           state,

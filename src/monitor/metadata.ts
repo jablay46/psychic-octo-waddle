@@ -23,6 +23,9 @@ export const SEL = {
   token1: toFunctionSelector('function token1() view returns (address)'),
   fee: toFunctionSelector('function fee() view returns (uint24)'),
   stable: toFunctionSelector('function stable() view returns (bool)'),
+  // Slipstream's swap selector. Slipstream pools expose fee() too, but the
+  // swap call takes spacing, so both are read.
+  tickSpacing: toFunctionSelector('function tickSpacing() view returns (int24)'),
   symbol: toFunctionSelector('function symbol() view returns (string)'),
   decimals: toFunctionSelector('function decimals() view returns (uint8)'),
   getReserves: toFunctionSelector('function getReserves() view returns (uint112,uint112,uint32)'),
@@ -114,6 +117,7 @@ export class PoolMetadataLoader {
       t1: number;
       fee: number;
       stable: number | null;
+      tickSpacing: number | null;
     }> = [];
 
     for (const c of fresh) {
@@ -128,7 +132,15 @@ export class PoolMetadataLoader {
       if (stable !== null) {
         calls.push({ method: 'eth_call', params: [{ to: c.address, data: SEL.stable }, 'latest'] });
       }
-      layout.push({ pool: c, t0, t1, fee, stable });
+      // Only Slipstream needs tickSpacing for its swap call.
+      const tickSpacing = c.dexKind === 'aero-slipstream' ? calls.length : null;
+      if (tickSpacing !== null) {
+        calls.push({
+          method: 'eth_call',
+          params: [{ to: c.address, data: SEL.tickSpacing }, 'latest'],
+        });
+      }
+      layout.push({ pool: c, t0, t1, fee, stable, tickSpacing });
     }
 
     const results = await this.rpc.batch<string>(calls);
@@ -140,6 +152,7 @@ export class PoolMetadataLoader {
       t1: `0x${string}`;
       feePpm: number;
       stable: boolean;
+      tickSpacing: number;
     }> = [];
 
     for (const entry of layout) {
@@ -167,9 +180,16 @@ export class PoolMetadataLoader {
             stable = decodeWord(s.value) !== 0n;
           }
         }
+        let tickSpacing = 0;
+        if (entry.tickSpacing !== null) {
+          const ts = results[entry.tickSpacing];
+          if (ts?.status === 'fulfilled' && ts.value && ts.value !== '0x') {
+            tickSpacing = Number(BigInt.asIntN(24, decodeWord(ts.value)));
+          }
+        }
         tokenAddresses.add(t0.toLowerCase() as `0x${string}`);
         tokenAddresses.add(t1.toLowerCase() as `0x${string}`);
-        resolved.push({ pool: entry.pool, t0, t1, feePpm, stable });
+        resolved.push({ pool: entry.pool, t0, t1, feePpm, stable, tickSpacing });
       } catch (err) {
         failed.push({
           pool: entry.pool.address,
@@ -195,6 +215,7 @@ export class PoolMetadataLoader {
         feePpm: r.feePpm,
         constantProduct: r.pool.poolModel === 'constant-product',
         stable: r.stable,
+        tickSpacing: r.tickSpacing,
       };
       const entry: LoadedPool = { meta, candidate: r.pool };
       this.poolCache.set(r.pool.address.toLowerCase(), entry);

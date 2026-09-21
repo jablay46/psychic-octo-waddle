@@ -7,8 +7,11 @@
  *   npm run discover -- --watch      # refresh on DISCOVERY_REFRESH_MS loop
  *   npm run discover -- --json       # print the watchlist to stdout
  *   npm run discover -- --dry-filter # show why pools were rejected
+ *   npm run discover -- --sources    # per-venue source/cross-check report
  *
- * This phase performs read-only HTTP calls. It never signs or sends anything.
+ * Sources: each venue's subgraph is primary; DexScreener cross-checks the rows
+ * and covers any venue whose subgraph failed. This phase performs read-only
+ * calls and never signs or sends anything.
  */
 import { loadSettings } from '../config/env.js';
 import { log } from '../core/logger.js';
@@ -31,6 +34,18 @@ function printSummary(w: { tokens: Array<{ symbol: string; dexIds: string[]; tot
   }
 }
 
+function printSources(reports: Array<{ dexId: string; origin: string; pools: number; crossChecked: number; error?: string }>): void {
+  const width = Math.max(10, ...reports.map((r) => r.dexId.length));
+  process.stdout.write(`\n  ${'VENUE'.padEnd(width)}  SOURCE        POOLS  X-CHECK  ERROR\n`);
+  process.stdout.write(`  ${'-'.repeat(width)}  ------------  -----  -------  -----\n`);
+  for (const r of reports) {
+    process.stdout.write(
+      `  ${r.dexId.padEnd(width)}  ${r.origin.padEnd(12)}  ${String(r.pools).padStart(5)}  ` +
+        `${String(r.crossChecked).padStart(7)}  ${r.error ? r.error.slice(0, 40) : ''}\n`,
+    );
+  }
+}
+
 async function main(): Promise<void> {
   const args = new Set(process.argv.slice(2));
   const settings = loadSettings();
@@ -40,6 +55,7 @@ async function main(): Promise<void> {
     log.info('starting discovery loop', {
       refreshMs: settings.DISCOVERY_REFRESH_MS,
       chainId: settings.CHAIN_ID,
+      subgraph: Boolean(settings.GRAPH_API_KEY),
     });
     const stop = discoverer.start((w) => printSummary(w));
     const shutdown = () => {
@@ -52,11 +68,15 @@ async function main(): Promise<void> {
     return;
   }
 
-  const { watchlist, reasons } = await discoverer.run();
+  const { watchlist, reasons, sources } = await discoverer.run();
 
   if (args.has('--dry-filter')) {
     process.stdout.write(`\nFilters: ${JSON.stringify(watchlist.filters, null, 2)}\n`);
     process.stdout.write(`Rejections: ${JSON.stringify(reasons, null, 2)}\n`);
+  }
+
+  if (args.has('--sources')) {
+    printSources(sources);
   }
 
   if (args.has('--json')) {
