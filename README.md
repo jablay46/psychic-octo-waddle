@@ -16,13 +16,23 @@ money-maker; Phase 4 is what would let it act when a cycle does clear.
 
 That conclusion was then stress-tested by removing every discretionary cost.
 Setting the slippage buffer, the flashloan premium and even gas to zero leaves
-**zero** profitable cycles, because the cycles never clear the fee screen in the
-first place: the best raw mid-price edge on the watchlist is about **-1 bps**,
-and the eye-catching dislocations (WETH ~13-26 bps, FLOCK ~10-25 bps) all cross
-at least one venue charging 30 bps. The wall is venue fees, not execution
-assumptions. Widening discovery is the only lever that changes this, and the
-public GeckoTerminal API rate-limits deep paging before the long tail is
-reachable.
+**zero** profitable cycles. So the cost model is not what is blocking them: the
+cycles never clear the fee screen in the first place, and ranking all 256 by raw
+mid-price edge puts the best at about **-1 bps**.
+
+An earlier draft of this note blamed venue fees, on the reasoning that the
+visible dislocations (WETH ~13-26 bps) cross a 30 bps pool. Reading the live fee
+per pool showed that was wrong: fee tiers on Base go far below the nominal 30
+bps, and the cheap ones are on the *same* pairs. USDC has a slipstream pool at
+0.09 bps and a v3 pool at 1 bps, for a combined floor near 1 bps; cbBTC is near
+1.9 bps; even AERO and VIRTUAL land around 9-10 bps. The best cycle is built
+from exactly those cheap pools, and still returns about -1 bps before any cost.
+The honest reading is that pool mids on these venues are already aligned to
+within a basis point at this liquidity tier, so there is no raw edge to spend
+fees on. Widening discovery to thinner tokens is the one untested lever; Phase 1
+has since moved off the GeckoTerminal feed (which rate-limited deep paging) onto
+venue subgraphs with DexScreener as a keyless fallback, so the long tail is now
+reachable, but whether it holds an edge has not been measured.
 
 ## The problem this solves
 
