@@ -118,7 +118,7 @@ function buildIndex(snapshot: Snapshot): Index {
       },
       feePpm: price.feePpm,
       constantProduct: price.state.kind === 'constant-product',
-      stable: false,
+      stable: price.stable,
       tickSpacing: price.tickSpacing,
     });
   }

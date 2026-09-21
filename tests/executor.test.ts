@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  FlashloanExecutorClient,
   UnsuitableOpportunityError,
   buildRequest,
   chooseProvider,
@@ -157,5 +158,51 @@ describe('buildRequest', () => {
     const now = BigInt(Math.floor(Date.now() / 1000));
     expect(request.deadline).toBeGreaterThan(now);
     expect(request.deadline).toBeLessThanOrEqual(now + BigInt(settings.DEADLINE_SECONDS) + 1n);
+  });
+});
+
+describe('gas ceiling', () => {
+  const request = buildRequest(opportunity([leg()]), settings);
+
+  function client(gasPriceWei: bigint, settingsOverride = settings) {
+    // The submit path is the only code that must honour the ceiling. The
+    // public client is stubbed at the two calls the path makes (gas price and
+    // the write); the wallet client only records what it was asked to send.
+    const sent: unknown[] = [];
+    const publicClient = {
+      getGasPrice: async () => gasPriceWei,
+      simulateContract: async () => ({ result: undefined }),
+      estimateContractGas: async () => 300_000n,
+    };
+    const walletClient = {
+      getAddresses: async () => ['0x00000000000000000000000000000000000000AA'],
+      writeContract: async (args: unknown) => {
+        sent.push(args);
+        return '0xtx';
+      },
+    };
+    const c = new FlashloanExecutorClient({
+      settings: { ...settingsOverride, DRY_RUN: false },
+      publicClient: publicClient as never,
+      walletClient: walletClient as never,
+    });
+    return { c, sent };
+  }
+
+  it('refuses to submit when gas exceeds MAX_GAS_PRICE_GWEI', async () => {
+    const ceilingWei = BigInt(settings.MAX_GAS_PRICE_GWEI) * 1_000_000_000n;
+    const { c, sent } = client(ceilingWei + 1n);
+    const result = await c.execute(request);
+    expect(result.submitted).toBe(false);
+    expect(result.error).toMatch(/MAX_GAS_PRICE_GWEI/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('submits at or below the ceiling', async () => {
+    const ceilingWei = BigInt(settings.MAX_GAS_PRICE_GWEI) * 1_000_000_000n;
+    const { c, sent } = client(ceilingWei);
+    const result = await c.execute(request);
+    expect(result.submitted).toBe(true);
+    expect(sent).toHaveLength(1);
   });
 });

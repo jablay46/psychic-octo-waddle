@@ -29,14 +29,22 @@ interface IMorpho {
     function flashLoan(address token, uint256 assets, bytes calldata data) external;
 }
 
-/// @notice Uniswap V3 SwapRouter (and the UniV3-compatible slice of it).
+/// @notice Uniswap V3 SwapRouter02 (and the UniV3-compatible slice of it).
+///
+/// @dev There is deliberately **no** `deadline` field here. SwapRouter02
+/// dropped it from the struct; its seven-field selector is 0x04e45aaf on Base,
+/// whereas the pre-02 struct that carries a `deadline` hashes to 0x414bf389,
+/// which is not in the deployed bytecode. Encoding the 02 params with an extra
+/// field shifts every following word, so the call misses the selector and falls
+/// through to the router's fallback instead of executing. Recency is bounded by
+/// `ExecutionParams.deadline` instead, which the executor checks before
+/// borrowing.
 interface IUniV3Router {
     struct ExactInputSingleParams {
         address tokenIn;
         address tokenOut;
         uint24 fee;
         address recipient;
-        uint256 deadline;
         uint256 amountIn;
         uint256 amountOutMinimum;
         uint160 sqrtPriceLimitX96;

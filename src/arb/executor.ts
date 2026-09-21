@@ -298,6 +298,20 @@ export class FlashloanExecutorClient {
     }
 
     const abi = await this.loadAbi();
+
+    // Safety rule 6: never send above the configured ceiling, even when the
+    // simulation is profitable. Gas can spike between sizing and submission,
+    // and a profitable cycle can be made unprofitable by the base fee alone.
+    const gasPrice = await this.publicClient.getGasPrice();
+    const ceiling = BigInt(Math.floor(this.options.settings.MAX_GAS_PRICE_GWEI * 1e9));
+    if (gasPrice > ceiling) {
+      return {
+        ...simulation,
+        submitted: false,
+        error: `gas price ${gasPrice} wei exceeds MAX_GAS_PRICE_GWEI ceiling ${ceiling} wei`,
+      };
+    }
+
     const hash = await this.walletClient.writeContract({
       address: this.executor,
       abi,
@@ -305,6 +319,7 @@ export class FlashloanExecutorClient {
       args: [request],
       account,
       chain: base,
+      gasPrice,
     });
     return { ...simulation, submitted: true, txHash: hash };
   }

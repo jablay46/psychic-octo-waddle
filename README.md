@@ -5,8 +5,13 @@ listed on two or more DEXes, watches their pools in real time, and (later
 phases) executes atomically through a flashloan so no large upfront capital is
 required.
 
-**Status: Phases 1-3 complete and running against Base mainnet.**
-Phases 4-6 are specified below and not yet implemented.
+**Status: Phases 1-4 complete and running against Base mainnet.**
+Phase 5 (end-to-end integration) and Phase 6 (staged rollout) are not yet done;
+see the roadmap below.
+
+Phase 4 (the flashloan executor) is implemented and dry-runs end to end, but it
+is **inert on the current watchlist**: it will not fire on live opportunity, only
+on manufactured dislocation. The reason is the "no raw edge" finding below.
 
 Phase 3 currently reports no net-profitable DEX-DEX cycle on Base: across 45
 pools and 256 enumerated cycles the spreads that exist (a few tens of bps on
@@ -53,7 +58,7 @@ list. This bot discovers that list for itself and keeps it current.
 | 1 | Off-chain pair discovery across venues | **done** |
 | 2 | Real-time parallel price monitoring (WS) | **done** |
 | 3 | Spread detection with a full fee/gas model | **done** |
-| 4 | Flashloan executor contract with provider fallback | todo |
+| 4 | Flashloan executor contract with provider fallback | **done** |
 | 5 | Off-chain to on-chain integration | todo |
 | 6 | Staged testing: fork, testnet, minimal mainnet | todo |
 
@@ -61,8 +66,10 @@ list. This bot discovers that list for itself and keeps it current.
 
 `npm run discover` performs one pass:
 
-1. Pulls the deepest Base pools from GeckoTerminal, keeping only pools whose
-   DEX is in the verified registry (`src/config/dexes.ts`).
+1. Pulls each venue's deepest pools from its venue subgraph, keeping only pools
+   whose DEX is in the verified registry (`src/config/dexes.ts`). DexScreener is
+   the keyless fallback and cross-check when a subgraph is unset or a venue is
+   not covered (see "Data sources" in `AGENTS.md`).
 2. Applies a liquidity floor per pool, then groups pools by both of their
    tokens. A pool only counts as a venue for a token if the pool itself clears
    the floor -- otherwise a dust pool next to USDC would make every token look
@@ -104,9 +111,16 @@ Uniswap V4 among the discovered set.
 src/
   config/     dexes.ts (verified registry), env.ts (validated settings)
   core/       types.ts, logger.ts, wsrpc.ts (batched WebSocket JSON-RPC)
-  discovery/  geckoterminal.ts, watchlist.ts, verifier.ts, discoverer.ts, cli.ts
+  discovery/  subgraph.ts, dexscreener.ts, watchlist.ts, verifier.ts,
+              discoverer.ts, cli.ts
   monitor/    amm.ts (price primitives), metadata.ts, monitor.ts, cli.ts,
               validate-prices.ts
+  arb/        graph.ts (rate graph, cycles), evaluate.ts (cost model,
+              simulation), executor.ts (Phase 4 calldata/dry-run/submit),
+              cli.ts (scan CLI)
+contracts/    Foundry project: src/FlashloanExecutor.sol, src/interfaces/,
+              test/FlashloanExecutor.fork.t.sol, script/Deploy.s.sol,
+              abi/FlashloanExecutor.json (generated, committed)
 tests/        unit tests + gated live integration tests
 ```
 
@@ -239,6 +253,53 @@ Only results that are net-positive after all four are reported.
   result for a completely broken scan. Watch mode logs the failure and tries
   the next block.
 
+## Phase 4 -- the executor
+
+`npm run scan -- --execute` builds a contract call for the best cycle and
+dry-runs it (`eth_call`) without sending anything. Nothing is broadcast unless
+`DRY_RUN=false` *and* `EXECUTOR_ADDRESS` is set.
+
+The contract (`contracts/src/FlashloanExecutor.sol`) borrows through one
+provider, runs every leg, repays, and forwards profit:
+
+| Provider | Callback | Fee |
+|----------|----------|-----|
+| Balancer V2 | `receiveFlashLoan` | 0 |
+| Morpho | `onMorphoFlashLoan` | 0 |
+| Aave V3 | `executeOperation` | configured premium |
+
+Its only guarantee is atomicity: if the cycle does not clear
+`minProfitAtomic` -- a floor in borrowed-token units, not USD -- the whole
+transaction reverts. Repayment is provider-specific (Balancer measures its own
+balance delta; Morpho and Aave pull with `transferFrom`), which is why the
+contract keeps three separate paths rather than one generic repay.
+
+Fork tests (`npm run test:contracts`) manufacture profit with `vm.store` on a
+UniV2 reserve, because no live cycle on the current watchlist clears the fees.
+
+### Executor correctness notes
+
+- **UniV3 uses SwapRouter02 encoding.** The `exactInputSingle` struct has seven
+  fields and no `deadline`; its selector is `0x04e45aaf`. The pre-02 struct with
+  a `deadline` hashes to `0x414bf389`, which is not in the deployed bytecode, so
+  the call falls through to the router's fallback instead of swapping. Recency
+  is bounded by `ExecutionParams.deadline`, which the contract checks up front.
+  (A live probe of `0x04e45aaf` on the router reverted `STF` -- "safe transfer
+  failed" -- because the probe held no input balance; that confirms the selector
+  is recognised, which is what matters here.)
+- **Aerodrome v2 legs carry their `minAmountOut` floor.** The router is called
+  with the leg's simulated floor rather than `0`, so a router that would return
+  less than the off-chain simulation can no longer settle "successfully" and
+  leave the profit check to absorb the difference.
+- **Provider callbacks only run while a loan is in flight.** An `_inFlight`
+  flag is set around the borrow and cleared after, and `_runLegs` refuses when
+  it is unset, so a third party cannot name this contract as a flashloan
+  receiver and replay stored legs. The stored params are also cleared once the
+  loan is settled.
+- **Gas ceiling.** The submit path reads the current gas price and refuses to
+  send above `MAX_GAS_PRICE_GWEI`, so a spike between sizing and submission
+  cannot turn a simulated profit into a loss.
+
 ## Setup
 
 ```
@@ -259,6 +320,7 @@ keyed endpoint (Alchemy, QuickNode) before Phase 2. `BASE_RPC_WS` defaults to
 npm test              # unit tests, no network
 RUN_LIVE=1 npm test   # adds the live Base integration check
 npm run typecheck
+npm run test:contracts   # Foundry fork tests (hits mainnet RPC, needs network)
 ```
 
 The unit tests cover the discovery logic that is easy to get wrong: dust pools
@@ -266,17 +328,28 @@ must not create venues, a token on one DEX is rejected, pools are deduplicated,
 and liquidity is attributed symmetrically to base and quote sides. There is also
 coverage of the safety-critical `DRY_RUN` parsing: it stays enabled unless the
 value is exactly `false`, so a misspelled value cannot silently arm live trading.
+Executor coverage includes the Venue->router mapping (UniV3 keys on fee,
+Slipstream on tick spacing, Aerodrome v2 on factory + stable flag) and the gas
+ceiling, which must refuse a send above `MAX_GAS_PRICE_GWEI`.
 
-The live test is deliberately not a mock. It calls GeckoTerminal and Base RPC
-for real, so a change in the API response shape or a moved factory address
-fails the build rather than failing silently in production.
+The live test is deliberately not a mock. It calls a public API and Base RPC for
+real, so a change in the API response shape or a moved factory address fails the
+build rather than failing silently in production.
 
 ## Design decisions worth knowing
 
-**Why GeckoTerminal as the discovery source, not a subgraph per DEX.**
-One consistent response shape across five venues beats five subgraph schemas
-and their indexing lag. The pool rows are then confirmed on-chain during
-`--verify`, so the API is a candidate generator, not an authority.
+**Why venue subgraphs as the primary discovery source.**
+The subgraphs page arbitrarily deep and carry `token0`/`token1` plus decimals,
+so the long tail is reachable without a per-token round trip. DexScreener is the
+keyless cross-check and fallback. The pool rows are still confirmed on-chain
+during `--verify`, so neither API is an authority -- both are candidate
+generators.
+
+**Why the registry stores a factory and a router, and they differ.**
+For UniV2 on Base the factory is `0x8909Dc…` and the router is `0x4752ba…`;
+for UniV3 they are `0x33128a…` and `0x262666…`. Using the router address as the
+factory (as the registry once did for UniV2) makes `--verify`'s `factory()`
+check fail on every pool, since a router's `factory()` does not return itself.
 
 **Why `reservesReadable` and `poolModel` are tracked per DEX.**
 Constant-product pools (Aerodrome V2, UniV2) allow an exact price from

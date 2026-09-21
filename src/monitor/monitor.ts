@@ -34,6 +34,13 @@ export interface PoolPrice {
   feePpm: number;
   /** Slipstream tick spacing; 0 elsewhere. Needed to build a swap leg. */
   tickSpacing: number;
+  /**
+   * Aerodrome v2 only: whether the pool uses the stable curve. The executor
+   * routes an Aerodrome swap by `(tokenIn, tokenOut, stable, factory)`, so
+   * dropping this flag makes the router resolve the *volatile* pool for a
+   * stable pair -- a different pool, or none at all.
+   */
+  stable: boolean;
   /** token1 per token0, as a 1e12-scaled bigint. */
   price: bigint;
   /** Same price as a JS number, for thresholds and logging only. */
@@ -161,6 +168,7 @@ export class PriceMonitor {
           pair: `${m.token0.symbol}/${m.token1.symbol}`,
           feePpm: m.feePpm,
           tickSpacing: m.tickSpacing,
+          stable: m.stable,
           price,
           priceNumber: priceToNumber(price),
           state,

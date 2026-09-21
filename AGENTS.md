@@ -106,13 +106,49 @@ top-N window is already aligned.
   `transferFrom` and need an exact approval instead. Doing both double-pays.
 - Morpho's live signature is `flashLoan(address,uint256,bytes)` -- 3 args. The
   4-arg form is not in its bytecode.
+- **UniV3 legs must use SwapRouter02 encoding: `exactInputSingle` has 7 fields
+  and no `deadline`, selector `0x04e45aaf`.** A struct carrying `deadline` is the
+  pre-02 layout, hashes to `0x414bf389`, and is not in the deployed Base router;
+  encoding it shifts every following word and the call reverts `STF`. Keep
+  `contracts/src/interfaces/IDexes.sol` at 7 fields. Recency is bounded by
+  `ExecutionParams.deadline`, checked at the top of `execute`.
+- **Aerodrome v2 legs must pass `leg.minAmountOut`, not `0`,** so the router
+  cannot return less than the simulation and leave the profit check to absorb it.
+- **Provider callbacks are gated by `_inFlight`.** An attacker can call Balancer
+  /Morpho/Aave naming this contract as receiver; without the flag they would
+  replay whatever legs are still stored. `_runLegs` reverts `NotProvider` when
+  the flag is unset, and `_params` is cleared once the loan settles.
+- **Gas ceiling is enforced at submit, not just declared.** `MAX_GAS_PRICE_GWEI`
+  is read in `FlashloanExecutorClient.execute`; a price above it aborts the send
+  (the README lists this as safety rule 6, so it must stay wired up).
 - Slipstream swaps key on `tickSpacing()`, not `fee()`; `PoolMeta.tickSpacing`
   exists for that reason and is 0 elsewhere.
+- **The `stable` flag is real data, not a placeholder.** Aerodrome v2 routes by
+  `(tokenIn, tokenOut, stable, factory)`, so it must survive
+  `PoolPrice -> buildIndex -> leg`. `buildIndex` once hardcoded `stable: false`,
+  which silently routed stable pools as volatile (a different pool, or none).
+  `tests/arb.test.ts` pins the propagation.
 - A leg with `amountIn == type(uint256).max` sweeps the balance; only legs after
   the first use it, so an early leg cannot spend the borrowed principal.
 - Fork tests manufacture profit with `vm.store` on a UniV2 reserve (lower it
   only -- raising it trips `UniswapV2: K`). That is a deterministic stand-in for
   a dislocation that may not exist at the current block.
+
+## DEX registry: factory != router
+`src/config/dexes.ts` holds both, and they are different contracts. Confirmed on
+Base mainnet:
+- UniV2: factory `0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6`, router
+  `0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24`. The registry previously used the
+  router as the factory, which made `--verify`'s `factory()` check fail on every
+  UniV2 pool (a router's `factory()` does not return itself).
+- UniV3: factory `0x33128a8fC17869897dcE68Ed026d694621f6FDfD`, router
+  `0x2626664c2603336E57B271c5C0b26F421741e481`.
+- Slipstream: factory `0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A`, router
+  `0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5`. The address in third-party docs
+  (`0xf8f2eB49…`) is a dead factory: `getPool(WETH,USDC,100)` returns zero, and a
+  router bound to it (`0x698Cb2b6…`) reverts `NW9` for every pool.
+When probing, always cross-check a pool's own `token0`/`token1`/`factory()`
+against the registry rather than trusting a single call.
 
 ## Conventions
 - Logs to stderr; stdout is for command output only (JSON must parse).
