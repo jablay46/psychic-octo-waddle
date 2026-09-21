@@ -115,6 +115,11 @@ contract FlashloanExecutor {
     ExecutionParams private _params;
     /// @dev Set inside the callback so the outer call can confirm it ran.
     bool private _callbackRan;
+    /// @dev True only between handing control to the provider and regaining it.
+    /// The callbacks check it so a loan this contract did not initiate -- a
+    /// third party can name any address as a flashloan receiver -- cannot drive
+    /// the stored legs. See `_runLegs`.
+    bool private _inFlight;
     /// @dev Provider's balance of the borrowed token measured just before the
     /// swaps, so repayment can be verified against what was actually owed.
     uint256 private _amountOwed;
@@ -170,6 +175,7 @@ contract FlashloanExecutor {
 
         _params = params;
         _callbackRan = false;
+        _inFlight = true;
 
         // The provider callbacks all check the caller against the provider's
         // own address, so a stray callback cannot be spoofed -- but the decoded
@@ -192,6 +198,10 @@ contract FlashloanExecutor {
             );
         }
 
+        // Control is back, so the callback window is over whether or not it
+        // fired. Clearing the flag here means a later, unrelated provider
+        // callback finds `_inFlight == false` and is refused.
+        _inFlight = false;
         if (!_callbackRan) revert CallbackNotRun();
     }
 
@@ -204,7 +214,7 @@ contract FlashloanExecutor {
     ) external {
         if (msg.sender != address(BALANCER_VAULT)) revert NotProvider();
         _amountOwed = amounts[0] + feeAmounts[0];
-        _runLegs(amounts[0]);
+        _runLegs();
     }
 
     /// @dev Morpho flashloan callback. Morpho charges no fee, but the owed
@@ -213,7 +223,7 @@ contract FlashloanExecutor {
     function onMorphoFlashLoan(uint256 assets, bytes calldata) external {
         if (msg.sender != address(MORPHO)) revert NotProvider();
         _amountOwed = assets;
-        _runLegs(assets);
+        _runLegs();
     }
 
     /// @dev Aave V3 simple flashloan callback. `premium` is the fee on top of
@@ -227,14 +237,20 @@ contract FlashloanExecutor {
     ) external returns (bool) {
         if (msg.sender != address(AAVE_POOL)) revert NotProvider();
         _amountOwed = amount + premium;
-        _runLegs(amount);
+        _runLegs();
         return true;
     }
 
     /// @dev Runs every leg, then repays and checks profit in the same frame so
     /// a failure reverts the whole transaction. Keeping repayment inside the
     /// callback is what lets the check be atomic.
-    function _runLegs(uint256 borrowed) internal {
+    ///
+    /// `_inFlight` is checked first: a provider callback can only be trusted
+    /// when this contract initiated the loan. Without the guard, an attacker
+    /// could call Balancer/Morpho/Aave naming this contract as receiver, which
+    /// would replay whatever legs are still stored from a previous run.
+    function _runLegs() internal {
+        if (!_inFlight) revert NotProvider();
         ExecutionParams storage p = _params;
         _callbackRan = true;
 
@@ -243,6 +259,9 @@ contract FlashloanExecutor {
         }
 
         _repayAndCollect(p.borrowToken, p.minProfitAtomic);
+        // The loan is settled, so the stored legs are spent. Clearing them
+        // removes the replay surface entirely rather than relying on the flag.
+        delete _params;
     }
 
     /// @dev Dispatches one leg to the right router. `amountOutMinimum` comes
@@ -265,7 +284,6 @@ contract FlashloanExecutor {
                 tokenOut: leg.tokenOut,
                 fee: leg.selector,
                 recipient: address(this),
-                deadline: _params.deadline,
                 amountIn: amountIn,
                 amountOutMinimum: leg.minAmountOut,
                 sqrtPriceLimitX96: 0
@@ -316,7 +334,7 @@ contract FlashloanExecutor {
                 abi.encodeWithSelector(
                     IAerodromeRouter.swapExactTokensForTokens.selector,
                     amountIn,
-                    uint256(0),
+                    leg.minAmountOut,
                     routes,
                     address(this),
                     _params.deadline

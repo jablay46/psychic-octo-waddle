@@ -138,7 +138,13 @@ export const BASE_DEXES: DexConfig[] = [
     geckoId: 'uniswap-v2-base',
     poolModel: 'constant-product',
     feeBps: 30,
-    factory: '0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24',
+    // The factory and the router are *different* contracts on Base. The router
+    // is a periphery contract that forwards to the factory; giving the router
+    // address as `factory` made the verifier's `factory()` check fail on every
+    // UniV2 pool, since a router does not expose `factory()` returning itself.
+    // The pool's own `factory()` call resolves to the address below, and the
+    // router reports it too, which confirms the pair.
+    factory: '0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6',
     subgraphId: '7e2mrDKuzmoSpS9WPHZycL3Ab52RNjdMrPLRduXM9TGi',
     subgraphSchema: 'v2-style',
     dexscreener: { dexIds: ['uniswap'], labels: ['v2'] },

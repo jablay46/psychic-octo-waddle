@@ -31,6 +31,7 @@ function cpPool(
     dexId,
     pair: 'WETH/USDC',
     tickSpacing: 0,
+    stable: false,
     feePpm,
     price,
     priceNumber: Number(price) / 1e12,
@@ -209,5 +210,23 @@ describe('findDislocations', () => {
     expect(weth!.spreadBps).toBeCloseTo(400, 0);
     expect(weth!.highVenue.dexId).toBe('aerodrome');
     expect(weth!.lowVenue.dexId).toBe('uniswap-v2');
+  });
+});
+
+describe('stable-flag propagation', () => {
+  it('carries an Aerodrome v2 pool\'s stable flag through a simulated leg', () => {
+    // The scanner reads `stable()` from the pool during metadata load. If it is
+    // dropped, the executor routes the swap as volatile and the router resolves
+    // the wrong pool. The flag has to survive PoolPrice -> buildIndex -> leg.
+    const stablePool = { ...makePool('0xccc', 'aerodrome-v2', 1000n * 10n ** 18n, 2_704_000n * 10n ** 6n, 100), stable: true };
+    const snap = snapshot([
+      makePool('0xaaa', 'uniswap-v2', 1000n * 10n ** 18n, 2_600_000n * 10n ** 6n, 3000),
+      stablePool,
+    ]);
+    const { opportunities } = findOpportunities(snap, cost(), { maxTradeUsd: 100_000 });
+    const legs = opportunities.flatMap((o) => o.legs);
+    const aeroLeg = legs.find((l) => l.dexId === 'aerodrome-v2');
+    expect(aeroLeg).toBeDefined();
+    expect(aeroLeg!.stable).toBe(true);
   });
 });
