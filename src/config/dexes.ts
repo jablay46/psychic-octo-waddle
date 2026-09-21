@@ -12,21 +12,53 @@ export type DexKind = 'uni-v3' | 'uni-v4' | 'uni-v2' | 'aero-v2' | 'aero-slipstr
 /** How to read a pool's price and fee, per AMM family. */
 export type PoolModel = 'constant-product' | 'concentrated-liquidity';
 
+/**
+ * Which subgraph schema a venue's pools are indexed under. The three shapes
+ * differ in the fields that carry liquidity and price, so the client needs to
+ * know the shape rather than guess:
+ *
+ *   v3-style     `totalValueLockedUSD` + `token0Price` (UniV3, Slipstream)
+ *   v2-style     `reserveUSD` + `reserve0`/`reserve1`  (UniV2, Aerodrome AMM)
+ *   cl-bare      `liquidity` only, token prices absent (Aerodrome CL fallback)
+ *
+ * `cl-bare` carries no USD figure, so those pools can only use the DEX
+ * registry's nominal fee and have liquidity 0 -- they are for coverage, not
+ * for ranking. Phase 2 reads the exact fee and price from the pool itself.
+ */
+export type SubgraphSchema = 'v3-style' | 'v2-style' | 'cl-bare';
+
+/** Venue ids used by DexScreener, for cross-checking subgraph rows. */
+export interface DexScreenerIds {
+  /** `dexId` values DexScreener reports for this venue. */
+  dexIds: string[];
+  /** `labels` values that further split a `dexId` (e.g. uniswap v2 vs v3). */
+  labels?: string[];
+}
+
 export interface DexConfig {
   /** Short id used in logs and the watchlist. */
   id: string;
   /** Human label. */
   label: string;
   kind: DexKind;
-  /** GeckoTerminal dex id, used to attribute discovered pools to a venue. */
+  /**
+   * GeckoTerminal dex id. Kept only so cached watchlists and the
+   * price-validation helper keep working; discovery no longer uses it.
+   */
   geckoId: string;
   poolModel: PoolModel;
   /** Fee in basis points. Applied per swap leg in the profit model. */
   feeBps: number;
   /** Factory address, when the DEX exposes one we can query directly. */
   factory?: `0x${string}`;
-  /** Subgraph id, when we read pools from The Graph instead of a factory. */
+  /** Deployment id of the venue's subgraph, used as the primary source. */
   subgraphId?: string;
+  /** Which subgraph schema `subgraphId` follows. */
+  subgraphSchema?: SubgraphSchema;
+  /** How this venue appears in DexScreener, for cross-checking and fallback. */
+  dexscreener?: DexScreenerIds;
+  /** Router used to execute a swap leg on this venue (Phase 4/5). */
+  router?: `0x${string}`;
   /** Whether Phase 2 can compute an exact on-chain price from reserves. */
   reservesReadable: boolean;
 }
@@ -44,6 +76,13 @@ export const BASE_DEXES: DexConfig[] = [
     // that Phase 2 reads from the pool itself. This is the volatile default.
     feeBps: 30,
     factory: '0x420DD381b31aEf6683db6B902084cB0FFECe40Da',
+    // No reliable subgraph indexes the Aerodrome v2 AMM pools, so this venue
+    // is served by the DexScreener fallback (which does report `aerodrome`
+    // pairs, unlabelled). Liquidating a mapping to the wrong factory would be
+    // worse than admitting the gap: an incorrect subgraph silently yields
+    // pools that fail on-chain verification.
+    dexscreener: { dexIds: ['aerodrome'] },
+    router: '0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43',
     reservesReadable: true,
   },
   {
@@ -55,6 +94,25 @@ export const BASE_DEXES: DexConfig[] = [
     // Slipstream fee tiers are per-pool (tick spacing based). Treated as a
     // flag until Phase 2 reads the pool's own fee.
     feeBps: 5,
+    // Canonical Slipstream CL factory. Verified on Base mainnet:
+    // `getPool(WETH, USDC, 100)` returns 0xb2cc224c…, the deepest CL pool, and
+    // that pool reports this exact address from `factory()`. The address
+    // circulating in third-party docs (0xf8f2eB49…) returns the zero address
+    // for the same call and is not the live factory.
+    factory: '0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A',
+    // The deployment named "Aerodrome Base Full" indexes Slipstream CL pools
+    // (its top row resolves on-chain to tickSpacing 100 / fee 624 ppm, and its
+    // CL factory), so it maps here rather than to the v2 AMM despite the name.
+    // Its rows carry `totalValueLockedUSD`, `token0Price` and `feeTier`.
+    subgraphId: 'GENunSHWLBXm59mBSgPzQ8metBEp9YDfdqwFr91Av1UM',
+    subgraphSchema: 'v3-style',
+    dexscreener: { dexIds: ['aerodrome'], labels: ['slipstream'] },
+    // Verified on a Base fork: this is the only router whose
+    // `exactInputSingle` succeeds against the live CL pools. The other
+    // candidate address (0x698Cb2b6…) shares the ABI and reverts with NW9
+    // ("Pool does not exist") for every pool, i.e. it is bound to the dead
+    // 0xf8f2eB49… factory.
+    router: '0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5',
     reservesReadable: false,
   },
   {
@@ -67,6 +125,10 @@ export const BASE_DEXES: DexConfig[] = [
     // so Phase 2 reads the pool's own fee() rather than assuming one.
     feeBps: 30,
     factory: '0x33128a8fC17869897dcE68Ed026d694621f6FDfD',
+    subgraphId: '43Hwfi3dJSoGpyas9VwNoDAv55yjgGrPpNSmbQZArzMG',
+    subgraphSchema: 'v3-style',
+    dexscreener: { dexIds: ['uniswap'], labels: ['v3'] },
+    router: '0x2626664c2603336E57B271c5C0b26F421741e481',
     reservesReadable: false,
   },
   {
@@ -76,6 +138,11 @@ export const BASE_DEXES: DexConfig[] = [
     geckoId: 'uniswap-v2-base',
     poolModel: 'constant-product',
     feeBps: 30,
+    factory: '0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24',
+    subgraphId: '7e2mrDKuzmoSpS9WPHZycL3Ab52RNjdMrPLRduXM9TGi',
+    subgraphSchema: 'v2-style',
+    dexscreener: { dexIds: ['uniswap'], labels: ['v2'] },
+    router: '0x4752ba5DBc23f44D87826276BF6Fd6b1C372aD24',
     reservesReadable: true,
   },
   {
@@ -85,6 +152,11 @@ export const BASE_DEXES: DexConfig[] = [
     geckoId: 'uniswap-v4-base',
     poolModel: 'concentrated-liquidity',
     feeBps: 30,
+    // V4 pools live in a singleton PoolManager and are keyed by a bytes32 id,
+    // not a pool contract, so there is no per-pool address to monitor or to
+    // swap against with the v2/v3 router. Kept in the registry for discovery
+    // completeness, excluded from the executable path in Phase 5.
+    dexscreener: { dexIds: ['uniswap'], labels: ['v4'] },
     reservesReadable: false,
   },
 ];
@@ -95,4 +167,28 @@ export function dexByGeckoId(geckoId: string): DexConfig | undefined {
 
 export function dexById(id: string): DexConfig | undefined {
   return BASE_DEXES.find((d) => d.id === id);
+}
+
+/** Venues with a deployed subgraph, i.e. those discovery can query directly. */
+export function subgraphDexes(): DexConfig[] {
+  return BASE_DEXES.filter((d) => d.subgraphId && d.subgraphSchema);
+}
+
+/**
+ * Maps a DexScreener `(dexId, label)` row onto a registry venue.
+ *
+ * DexScreener splits Uniswap by label (`v2`/`v3`/`v4`) but Aerodrome v2 and
+ * Slipstream both arrive as `dexId = aerodrome` with no distinguishing label
+ * on most rows. When a venue's labels are declared, a row only matches on an
+ * exact label; a venue with no labels declared matches on dexId alone. That
+ * ordering matters: an unlabelled aerodrome row is attributed to the v2
+ * constant-product venue, which is the conservative default, and Phase 2
+ * reads the real pool model from the contract anyway.
+ */
+export function dexByDexScreenerId(dexId: string, label?: string): DexConfig | undefined {
+  const candidates = BASE_DEXES.filter((d) => d.dexscreener?.dexIds.includes(dexId));
+  if (candidates.length === 0) return undefined;
+  const labelled = candidates.find((d) => d.dexscreener?.labels?.includes(label ?? ''));
+  if (labelled) return labelled;
+  return candidates.find((d) => !d.dexscreener?.labels);
 }

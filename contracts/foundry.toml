@@ -1,0 +1,13 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+script = "script"
+optimizer = true
+optimizer_runs = 1_000_000
+solc_version = "0.8.28"
+evm_version = "cancun"
+# Tests fork Base mainnet; a fresh RPC per run is required for the fork to
+# reflect current state, so no cache is written for `test` in CI.
+fs_permissions = []
