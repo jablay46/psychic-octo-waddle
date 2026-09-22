@@ -144,9 +144,20 @@ export type Settings = z.infer<typeof schema> & {
 
 let cached: Settings | null = null;
 
-export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
-  if (cached) return cached;
-  const parsed = schema.safeParse(env);
+/**
+ * Parses and validates settings.
+ *
+ * Memoisation is keyed on the *source*: only the no-argument form, which reads
+ * the live `process.env`, is cached. An explicit `env` is parsed every call.
+ * Caching that path instead would silently ignore the caller's argument after
+ * the first call -- a test passing its own env would get a previous test's
+ * settings, and a long-lived process could never reload after an env change.
+ */
+export function loadSettings(env?: NodeJS.ProcessEnv): Settings {
+  if (env === undefined) {
+    if (cached) return cached;
+  }
+  const parsed = schema.safeParse(env ?? process.env);
   if (!parsed.success) {
     const detail = parsed.error.issues
       .map((i) => `  ${i.path.join('.') || '(root)'}: ${i.message}`)
@@ -158,11 +169,12 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
   if (unit.SLIPPAGE_BPS < 0 || unit.SLIPPAGE_BPS > 2_000) {
     throw new Error('SLIPPAGE_BPS must be between 0 and 2000 (0-20%)');
   }
-  cached = {
+  const settings: Settings = {
     ...unit,
     privateKey: unit.PRIVATE_KEY as `0x${string}` | undefined,
   };
-  return cached;
+  if (env === undefined) cached = settings;
+  return settings;
 }
 
 /** Test helper: forget the memoised settings. */

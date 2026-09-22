@@ -57,6 +57,41 @@ describe('settings', () => {
   });
 });
 
+describe('settings cache', () => {
+  beforeEach(() => resetSettingsCache());
+
+  it('honours an explicit env on every call, not just the first', () => {
+    // Regression: the cache used to short-circuit before parsing, so the second
+    // call returned the first call's settings and the argument was ignored.
+    const a = loadSettings({ DRY_RUN: 'true', MIN_PROFIT_BPS: '5' } as unknown as NodeJS.ProcessEnv);
+    const b = loadSettings({ DRY_RUN: 'false', MIN_PROFIT_BPS: '99' } as unknown as NodeJS.ProcessEnv);
+    expect(a.MIN_PROFIT_BPS).toBe(5);
+    expect(b.MIN_PROFIT_BPS).toBe(99);
+    expect(b.DRY_RUN).toBe(false);
+  });
+
+  it('does not let a cached no-arg load shadow an explicit env', () => {
+    loadSettings(); // populates the memoised, process.env-backed settings
+    const explicit = loadSettings({ MIN_PROFIT_BPS: '42' } as unknown as NodeJS.ProcessEnv);
+    expect(explicit.MIN_PROFIT_BPS).toBe(42);
+  });
+
+  it('still memoises the no-arg form (same object, parsed once)', () => {
+    const first = loadSettings();
+    const second = loadSettings();
+    expect(second).toBe(first);
+  });
+
+  it('revalidates an explicit env even when it is malformed', () => {
+    // The old cache returned a valid prior result and never saw the bad value.
+    const ok = loadSettings({} as NodeJS.ProcessEnv);
+    expect(ok.DRY_RUN).toBe(true);
+    expect(() =>
+      loadSettings({ SLIPPAGE_BPS: '9999' } as unknown as NodeJS.ProcessEnv),
+    ).toThrow(/SLIPPAGE_BPS/);
+  });
+});
+
 describe('redaction', () => {
   it('masks a 32-byte hex secret', () => {
     const key = `0x${'b'.repeat(64)}`;
