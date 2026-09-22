@@ -6,8 +6,13 @@ import {
   feeBps,
   feeRate,
   invertPrice,
+  midPriceOf,
   priceToNumber,
+  quoteSwap,
+  stableSwapOut,
+  stableSwapPrice,
   type PoolMeta,
+  type RawPoolState,
 } from '../src/monitor/amm.js';
 
 const WETH = '0x4200000000000000000000000000000000000006' as const;
@@ -173,5 +178,151 @@ describe('constantProductOut', () => {
     const a = constantProductOut(10n ** 15n, r, r, 3000);
     const b = constantProductOut(10n ** 16n, r, r, 3000);
     expect(b).toBeGreaterThan(a);
+  });
+});
+
+/**
+ * Golden values for the Solidly/Aerodrome stable curve.
+ *
+ * Every expected output below was read from the live Base pool's
+ * `getAmountOut(amountIn, tokenIn)` via `eth_call` (a direct contract call, not
+ * a reimplementation), so these pin the off-chain port to the contract exactly.
+ * Pools and the block data are noted per case.
+ */
+describe('stableSwapOut (Solidly / Aerodrome x^3y + y^3x)', () => {
+  const D6 = 10n ** 6n;
+  const D18 = 10n ** 18n;
+
+  // --- USDC/USDT stable pool 0x96508ae8…, fee 500 ppm (0.05%) --------------
+  // token0 = USDC(6), token1 = USDT(6)
+  const U_R0 = 3_883_598_519n;
+  const U_R1 = 4_173_124_261n;
+
+  it('matches the live USDC/USDT pool, token0 in', () => {
+    // getAmountOut(1_000_000, USDC) = 999591
+    expect(stableSwapOut(1_000_000n, U_R0, U_R1, 500, D6, D6)).toBe(999_591n);
+    // getAmountOut(1_000_000_000, USDC) = 995462432
+    expect(stableSwapOut(1_000_000_000n, U_R0, U_R1, 500, D6, D6)).toBe(995_462_432n);
+    // getAmountOut(100_000_000_000, USDC) = 4172653793
+    expect(stableSwapOut(100_000_000_000n, U_R0, U_R1, 500, D6, D6)).toBe(4_172_653_793n);
+  });
+
+  it('matches the live USDC/USDT pool, token1 in (reverse direction)', () => {
+    // getAmountOut(1_000_000, USDT) = 999406
+    expect(stableSwapOut(1_000_000n, U_R1, U_R0, 500, D6, D6)).toBe(999_406n);
+    // getAmountOut(1_000_000_000, USDT) = 986711904
+    expect(stableSwapOut(1_000_000_000n, U_R1, U_R0, 500, D6, D6)).toBe(986_711_904n);
+    // getAmountOut(100_000_000_000, USDT) = 3883131965
+    expect(stableSwapOut(100_000_000_000n, U_R1, U_R0, 500, D6, D6)).toBe(3_883_131_965n);
+  });
+
+  // --- cbETH/WETH stable pool 0x9e8bfeb5…, fee 500 ppm ---------------------
+  // token0 = cbETH(18), token1 = WETH(18)
+  const C_R0 = 1_711_418_624_695_165_107n;
+  const C_R1 = 4_016_920_967_096_314_708n;
+
+  it('matches the live cbETH/WETH pool in both directions', () => {
+    expect(stableSwapOut(1_000_000_000_000_000n, C_R0, C_R1, 500, D18, D18)).toBe(
+      1_138_710_675_604_686n,
+    );
+    expect(stableSwapOut(1_000_000_000_000_000n, C_R1, C_R0, 500, D18, D18)).toBe(
+      877_016_103_776_087n,
+    );
+    expect(stableSwapOut(1_000_000_000_000_000_000n, C_R0, C_R1, 500, D18, D18)).toBe(
+      1_037_444_916_830_608_266n,
+    );
+    expect(stableSwapOut(1_000_000_000_000_000_000n, C_R1, C_R0, 500, D18, D18)).toBe(
+      712_762_585_457_373_498n,
+    );
+    expect(stableSwapOut(100_000_000_000_000_000_000n, C_R0, C_R1, 500, D18, D18)).toBe(
+      4_016_796_226_183_330_952n,
+    );
+    expect(stableSwapOut(100_000_000_000_000_000_000n, C_R1, C_R0, 500, D18, D18)).toBe(
+      1_711_301_999_638_276_068n,
+    );
+  });
+
+  // --- AERO/USDC stable pool 0x861ee8b9…, fee 20_000 ppm (2%) --------------
+  // token0 = USDC(6), token1 = AERO(18). Mixed decimals and an extreme
+  // imbalance: the decimal scaling in the port is what makes this match.
+  const A_R0 = 4_342_258_657n;
+  const A_R1 = 15_706_898_228_710_900_520_821n;
+
+  it('matches the live mixed-decimal AERO/USDC pool', () => {
+    expect(stableSwapOut(1_000_000_000_000_000n, A_R0, A_R1, 20_000, D6, D18)).toBe(
+      15_706_898_228_710_881_277_154n,
+    );
+    expect(stableSwapOut(1_000_000_000_000_000n, A_R1, A_R0, 20_000, D18, D6)).toBe(678n);
+    expect(stableSwapOut(1_000_000_000_000_000_000n, A_R0, A_R1, 20_000, D6, D18)).toBe(
+      15_706_898_228_710_900_520_820n,
+    );
+    expect(stableSwapOut(1_000_000_000_000_000_000n, A_R1, A_R0, 20_000, D18, D6)).toBe(677_975n);
+  });
+
+  it('returns zero for a zero input and rejects empty reserves', () => {
+    expect(stableSwapOut(0n, U_R0, U_R1, 500, D6, D6)).toBe(0n);
+    expect(() => stableSwapOut(1n, 0n, U_R1, 500, D6, D6)).toThrow(/positive/);
+  });
+
+  it('increases monotonically with input size', () => {
+    const a = stableSwapOut(1_000_000_000n, U_R0, U_R1, 500, D6, D6);
+    const b = stableSwapOut(2_000_000_000n, U_R0, U_R1, 500, D6, D6);
+    expect(b).toBeGreaterThan(a);
+  });
+});
+
+describe('stableSwapPrice vs the constant-product ratio', () => {
+  const D6 = 10n ** 6n;
+  const U_R0 = 3_883_598_519n;
+  const U_R1 = 4_173_124_261n;
+
+  function stableMeta(): PoolMeta {
+    return {
+      address: '0x96508ae8037c6bd16162620187691f1c1e3e07c1',
+      dexId: 'aerodrome-v2',
+      token0: { address: USDC, symbol: 'USDC', decimals: 6 },
+      token1: { address: '0xfde4c96c8593536e31f229ea8f37b2ada2699bb2', symbol: 'USDT', decimals: 6 },
+      feePpm: 500,
+      constantProduct: true,
+      stable: true,
+      tickSpacing: 0,
+    };
+  }
+
+  it('prices a mildly imbalanced stable pool near 1, far from the reserve ratio', () => {
+    const meta = stableMeta();
+    const curve = priceToNumber(stableSwapPrice(U_R0, U_R1, meta));
+    const ratio = priceToNumber(constantProductPrice(U_R0, U_R1, meta));
+    // The raw ratio is 1.0746, but the stable curve pulls the marginal price to
+    // ~1.0001: on Solidly the ratio is *not* the price. This ~7% gap is what the
+    // old code got wrong on every Aerodrome stable pool.
+    expect(ratio).toBeCloseTo(1.0746, 3);
+    expect(curve).toBeCloseTo(1.0001, 3);
+    expect(curve).toBeLessThan(ratio);
+    expect(Math.abs(curve / ratio - 1)).toBeGreaterThan(0.05);
+  });
+
+  it('prices a heavily imbalanced stable pool well below the reserve ratio', () => {
+    // At a 5x imbalance the curve mid (1.84) is far below the ratio (5) -- the
+    // further from balance, the larger the gap, which is what makes the old
+    // constant-product price a fabricated edge.
+    const meta = stableMeta();
+    const r0 = 1_000_000n * D6;
+    const r1 = 5_000_000n * D6;
+    const curve = priceToNumber(stableSwapPrice(r0, r1, meta));
+    expect(curve).toBeCloseTo(1.842, 2);
+    expect(curve).toBeLessThan(priceToNumber(constantProductPrice(r0, r1, meta)));
+  });
+
+  it('routes midPriceOf and quoteSwap through the curve when stable is set', () => {
+    const meta = stableMeta();
+    const state: RawPoolState = { kind: 'constant-product', reserve0: U_R0, reserve1: U_R1 };
+    expect(midPriceOf(state, meta)).toBe(stableSwapPrice(U_R0, U_R1, meta));
+    const quote = quoteSwap(state, meta, 1_000_000n, true);
+    expect(quote.amountOut).toBe(stableSwapOut(1_000_000n, U_R0, U_R1, 500, D6, D6));
+  });
+
+  it('rejects empty reserves', () => {
+    expect(() => stableSwapPrice(0n, 1n, stableMeta())).toThrow(/positive/);
   });
 });

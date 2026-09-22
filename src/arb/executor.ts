@@ -313,6 +313,22 @@ export class FlashloanExecutorClient {
 
     const abi = await this.loadAbi();
 
+    // The scan budgets a fixed `ESTIMATED_GAS_UNITS`; the dry-run just
+    // measured the real cost. If that is materially higher, the cost model
+    // understated gas and the request's profit -- and therefore its
+    // `minProfitAtomic` floor -- cannot be trusted. Refuse rather than send a
+    // cycle whose floor was sized against too few gas units.
+    const budgeted = BigInt(this.options.settings.ESTIMATED_GAS_UNITS);
+    const driftBps = BigInt(this.options.settings.MAX_GAS_ESTIMATE_DRIFT_BPS);
+    const tolerated = (budgeted * (10_000n + driftBps)) / 10_000n;
+    if (simulation.gasEstimate !== undefined && simulation.gasEstimate > tolerated) {
+      return {
+        ...simulation,
+        submitted: false,
+        error: `gas estimate ${simulation.gasEstimate} exceeds ESTIMATED_GAS_UNITS ${budgeted} by more than ${driftBps} bps`,
+      };
+    }
+
     // Safety rule 6: never send above the configured ceiling, even when the
     // simulation is profitable. Gas can spike between sizing and submission,
     // and a profitable cycle can be made unprofitable by the base fee alone.

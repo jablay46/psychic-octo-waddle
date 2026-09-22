@@ -1,9 +1,12 @@
 /**
  * AMM price primitives.
  *
- * Two families of pool, two ways to get an exact spot price:
+ * Three families of pool, three ways to get an exact spot price:
  *
- *   constant-product   price comes from the reserve ratio directly.
+ *   constant-product        price comes from the reserve ratio directly.
+ *   stable (Solidly/Aerodrome x^3*y + y^3*x)  price and swap output come from
+ *                           the stable invariant; the reserve ratio is *not*
+ *                           the marginal price even when the pool is balanced.
  *   concentrated-liquidity  price comes from sqrtPriceX96 in slot0.
  *
  * Everything here is bigint arithmetic until the final human-readable number.
@@ -190,6 +193,126 @@ function sqrtBigInt(value: bigint): bigint {
   return x;
 }
 
+// --- Solidly / Aerodrome stable curve ---------------------------------------
+//
+// A stable pool does not price along x*y=k. It uses the Solidly invariant
+// `x^3*y + y^3*x = k`, which is flat near balance and steep far from it. The
+// off-chain port below is a line-by-line translation of the on-chain router
+// math, normalised to 1e18 so both decimals and magnitudes line up:
+//
+//   https://github.com/aerodrome-finance/contracts/blob/main/contracts/Pool.sol
+//   (_k, _f, _d, _get_y, _getAmountOut)
+//
+// It is checked against live getAmountOut() values from the Base USDC/USDT,
+// cbETH/WETH and AERO/USDC stable pools in tests/amm.test.ts; every fixture
+// matches the contract exactly.
+const STABLE_ONE = 10n ** 18n;
+
+/** `_f` from the contract: the x^3*y + y^3*x numerator, 1e18-normalised. */
+function stableF(x0: bigint, y: bigint): bigint {
+  const a = (x0 * y) / STABLE_ONE;
+  const b = (x0 * x0) / STABLE_ONE + (y * y) / STABLE_ONE;
+  return (a * b) / STABLE_ONE;
+}
+
+/** `_d`, the derivative of `_f` with respect to y: 3*x0*(y^2) + x0^3. */
+function stableD(x0: bigint, y: bigint): bigint {
+  return (
+    (3n * x0 * ((y * y) / STABLE_ONE)) / STABLE_ONE +
+    (((x0 * x0) / STABLE_ONE) * x0) / STABLE_ONE
+  );
+}
+
+/** `_k`, the invariant. The second argument is the contract's `_balance1`. */
+function stableK(x: bigint, y: bigint, dec0: bigint, dec1: bigint): bigint {
+  const nx = (x * STABLE_ONE) / dec0;
+  const ny = (y * STABLE_ONE) / dec1;
+  const a = (nx * ny) / STABLE_ONE;
+  const b = (nx * nx) / STABLE_ONE + (ny * ny) / STABLE_ONE;
+  return (a * b) / STABLE_ONE;
+}
+
+/**
+ * Newton-Raphson solve of `_f(x0, y) = xy` for y, matching `_get_y` exactly,
+ * including its convergence quirks. Callers pass already-normalised amounts.
+ */
+function stableGetY(x0: bigint, xy: bigint, y: bigint, dec0: bigint, dec1: bigint): bigint {
+  for (let i = 0; i < 255; i++) {
+    const k = stableF(x0, y);
+    if (k < xy) {
+      let dy = ((xy - k) * STABLE_ONE) / stableD(x0, y);
+      if (dy === 0n) {
+        // Converged, or the step rounded below one wei. The contract resolves
+        // that tie by nudging y up when it is still below the target.
+        if (k === xy) return y;
+        if (stableK(x0, y + 1n, dec0, dec1) > xy) return y + 1n;
+        dy = 1n;
+      }
+      y = y + dy;
+    } else {
+      let dy = ((k - xy) * STABLE_ONE) / stableD(x0, y);
+      if (dy === 0n) {
+        if (k === xy || stableF(x0, y - 1n) < xy) return y;
+        dy = 1n;
+      }
+      y = y - dy;
+    }
+  }
+  throw new Error('stable curve did not converge');
+}
+
+/**
+ * Output of an exact-input swap on a Solidly/Aerodrome stable pool.
+ *
+ * `reserveIn`/`reserveOut` and `decIn`/`decOut` are the pair oriented to the
+ * trade direction (`decIn` is 10^decimals of the input token), which is what
+ * lets this serve either side of the pool without the caller tracking token0.
+ */
+export function stableSwapOut(
+  amountIn: bigint,
+  reserveIn: bigint,
+  reserveOut: bigint,
+  feePpm: number,
+  decIn: bigint,
+  decOut: bigint,
+): bigint {
+  if (amountIn <= 0n) return 0n;
+  if (reserveIn <= 0n || reserveOut <= 0n) throw new Error('reserves must be positive');
+  if (decIn <= 0n || decOut <= 0n) throw new Error('decimals must be positive');
+
+  amountIn = amountIn - (amountIn * BigInt(Math.round(feePpm))) / 1_000_000n;
+
+  // Invariant is taken in raw units (as the contract does), while the solve is
+  // normalised: k works because it normalises both sides itself.
+  const xy = stableK(reserveIn, reserveOut, decIn, decOut);
+  const inNorm = (reserveIn * STABLE_ONE) / decIn;
+  const outNorm = (reserveOut * STABLE_ONE) / decOut;
+  const amountNorm = (amountIn * STABLE_ONE) / decIn;
+  const y = outNorm - stableGetY(amountNorm + inNorm, xy, outNorm, decIn, decOut);
+  return (y * decOut) / STABLE_ONE;
+}
+
+/**
+ * Marginal price of token1 per token0 on a stable pool, 1e12-scaled.
+ *
+ * Read as the fee-free limit of a vanishing trade, so it is a spot price rather
+ * than a fee-laden one. Near balance the curve prices at ~1.0 no matter what the
+ * reserve ratio is; the two diverge as the pool is pushed off balance. That gap
+ * is the whole reason the raw ratio must not be used.
+ */
+export function stableSwapPrice(r0: bigint, r1: bigint, meta: PoolMeta): bigint {
+  if (r0 <= 0n || r1 <= 0n) throw new Error('reserves must be positive');
+  const dec0 = toDecimalFactor(meta.token0.decimals);
+  const dec1 = toDecimalFactor(meta.token1.decimals);
+  const tiny = r0 / 1_000_000n > 0n ? r0 / 1_000_000n : 1n;
+  const out = stableSwapOut(tiny, r0, r1, 0, dec0, dec1);
+  if (out <= 0n) throw new Error('stable quote rounds to zero');
+  const num = toDecimal(out, meta.token1.decimals) * PRICE_SCALE;
+  const den = toDecimal(tiny, meta.token0.decimals);
+  if (den === 0n) throw new Error('token0 side rounds to zero');
+  return num / den;
+}
+
 /**
  * Output of an exact-input swap through a v3-style pool.
  *
@@ -257,12 +380,21 @@ export function quoteSwap(
 
   const rawOut =
     state.kind === 'constant-product'
-      ? constantProductOut(
-          amountIn,
-          zeroForOne ? state.reserve0 : state.reserve1,
-          zeroForOne ? state.reserve1 : state.reserve0,
-          meta.feePpm,
-        )
+      ? meta.stable
+        ? stableSwapOut(
+            amountIn,
+            zeroForOne ? state.reserve0 : state.reserve1,
+            zeroForOne ? state.reserve1 : state.reserve0,
+            meta.feePpm,
+            toDecimalFactor(zeroForOne ? meta.token0.decimals : meta.token1.decimals),
+            toDecimalFactor(zeroForOne ? meta.token1.decimals : meta.token0.decimals),
+          )
+        : constantProductOut(
+            amountIn,
+            zeroForOne ? state.reserve0 : state.reserve1,
+            zeroForOne ? state.reserve1 : state.reserve0,
+            meta.feePpm,
+          )
       : concentratedLiquidityOut(amountInAfterFee, state.sqrtPriceX96, state.liquidity, zeroForOne);
 
   if (rawOut === null) {
@@ -293,11 +425,19 @@ export function quoteSwap(
   return { amountOut, effectivePrice, midPrice, impactBps, outOfRange: false };
 }
 
-/** Mid price of a raw state, token1 per token0, 1e12-scaled. */
+/**
+ * Mid price of a raw state, token1 per token0, 1e12-scaled.
+ *
+ * A stable constant-product pool is priced on the Solidly curve, not the
+ * reserve ratio, so the `stable` flag has to be consulted before the family.
+ */
 export function midPriceOf(state: RawPoolState, meta: PoolMeta): bigint {
-  return state.kind === 'constant-product'
-    ? constantProductPrice(state.reserve0, state.reserve1, meta)
-    : concentratedLiquidityPrice(state.sqrtPriceX96, meta);
+  if (state.kind === 'constant-product') {
+    return meta.stable
+      ? stableSwapPrice(state.reserve0, state.reserve1, meta)
+      : constantProductPrice(state.reserve0, state.reserve1, meta);
+  }
+  return concentratedLiquidityPrice(state.sqrtPriceX96, meta);
 }
 
 export { sqrtBigInt };

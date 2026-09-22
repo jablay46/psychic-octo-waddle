@@ -1,12 +1,7 @@
 import type { PoolCandidate } from '../core/types.js';
 import { decodeWord, type SubscriptionRpc } from '../core/wsrpc.js';
 import { log } from '../core/logger.js';
-import {
-  constantProductPrice,
-  concentratedLiquidityPrice,
-  priceToNumber,
-  type RawPoolState,
-} from './amm.js';
+import { midPriceOf, priceToNumber, type RawPoolState } from './amm.js';
 import { PoolMetadataLoader, SEL, type LoadedPool } from './metadata.js';
 
 /**
@@ -151,12 +146,10 @@ export class PriceMonitor {
       }
       try {
         const m = entry.pool.meta;
-        let price: bigint;
         let state: RawPoolState;
         if (m.constantProduct) {
           const r0 = decodeWord(res.value);
           const r1 = decodeWord('0x' + res.value.slice(66));
-          price = constantProductPrice(r0, r1, m);
           state = { kind: 'constant-product', reserve0: r0, reserve1: r1 };
         } else {
           const sqrtPriceX96 = decodeWord(res.value);
@@ -165,9 +158,12 @@ export class PriceMonitor {
             liqRes?.status === 'fulfilled' && liqRes.value && liqRes.value !== '0x'
               ? decodeWord(liqRes.value)
               : 0n;
-          price = concentratedLiquidityPrice(sqrtPriceX96, m);
           state = { kind: 'concentrated-liquidity', sqrtPriceX96, liquidity };
         }
+        // Let the AMM layer pick the curve: a stable pool must not be priced
+        // from its reserve ratio, which is what `constantProductPrice` alone
+        // would do.
+        const price = midPriceOf(state, m);
         prices.set(addr, {
           pool: addr,
           dexId: m.dexId,

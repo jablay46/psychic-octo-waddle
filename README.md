@@ -312,6 +312,11 @@ UniV2 reserve, because no live cycle on the current watchlist clears the fees.
 - **Gas ceiling.** The submit path reads the current gas price and refuses to
   send above `MAX_GAS_PRICE_GWEI`, so a spike between sizing and submission
   cannot turn a simulated profit into a loss.
+- **Gas-estimate drift.** The scan budgets a fixed `ESTIMATED_GAS_UNITS`; the
+  dry-run measures the real cost. The submit path refuses when the estimate
+  exceeds the budget by more than `MAX_GAS_ESTIMATE_DRIFT_BPS`, because a
+  request that costs far more gas than the model assumed was sized against a
+  profit -- and a `minProfitAtomic` floor -- that cannot be trusted.
 
 ## Setup
 

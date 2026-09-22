@@ -51,7 +51,9 @@ const schema = z.object({
   /**
    * The Graph gateway API key. Primary discovery source; without it the
    * subgraph leg is skipped and discovery falls back to DexScreener alone.
-   * Never logged -- `redact` strips it from any URL that reaches a log line.
+   * Never logged -- `redact` strips it from any URL that reaches a log line,
+   * and the logger applies `redact` to both the message and the serialised
+   * `fields`, so a key cannot leak through a structured field either.
    */
   GRAPH_API_KEY: z.string().optional(),
   /** Pages of 1000 pools to pull per venue from each subgraph. */
@@ -95,6 +97,14 @@ const schema = z.object({
   FLASHLOAN_FEE_BPS: num(5),
   /** Gas units budgeted for borrow -> swap -> swap -> repay. */
   ESTIMATED_GAS_UNITS: num(400_000).pipe(z.number().int().positive()),
+  /**
+   * Slack above `ESTIMATED_GAS_UNITS` that the submit path tolerates before it
+   * refuses to send, in bps. The scan budgets a fixed number of gas units;
+   * if the dry-run gas estimate comes in materially higher, the scan's cost
+   * model understated gas and its profit figure cannot be trusted for that
+   * request. Default 2000 = refuse above 1.2x the estimate.
+   */
+  MAX_GAS_ESTIMATE_DRIFT_BPS: num(2_000).pipe(z.number().int().min(0)),
 
   // --- flashloan providers ------------------------------------------------
   ENABLE_BALANCER: boolFromEnv(true),
@@ -142,9 +152,20 @@ export type Settings = z.infer<typeof schema> & {
 
 let cached: Settings | null = null;
 
-export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
-  if (cached) return cached;
-  const parsed = schema.safeParse(env);
+/**
+ * Parses and validates settings.
+ *
+ * Memoisation is keyed on the *source*: only the no-argument form, which reads
+ * the live `process.env`, is cached. An explicit `env` is parsed every call.
+ * Caching that path instead would silently ignore the caller's argument after
+ * the first call -- a test passing its own env would get a previous test's
+ * settings, and a long-lived process could never reload after an env change.
+ */
+export function loadSettings(env?: NodeJS.ProcessEnv): Settings {
+  if (env === undefined) {
+    if (cached) return cached;
+  }
+  const parsed = schema.safeParse(env ?? process.env);
   if (!parsed.success) {
     const detail = parsed.error.issues
       .map((i) => `  ${i.path.join('.') || '(root)'}: ${i.message}`)
@@ -156,11 +177,12 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
   if (unit.SLIPPAGE_BPS < 0 || unit.SLIPPAGE_BPS > 2_000) {
     throw new Error('SLIPPAGE_BPS must be between 0 and 2000 (0-20%)');
   }
-  cached = {
+  const settings: Settings = {
     ...unit,
     privateKey: unit.PRIVATE_KEY as `0x${string}` | undefined,
   };
-  return cached;
+  if (env === undefined) cached = settings;
+  return settings;
 }
 
 /** Test helper: forget the memoised settings. */
@@ -171,15 +193,28 @@ export function resetSettingsCache(): void {
 /**
  * Redacts anything key-shaped before it can reach a log line.
  *
- * The subgraph gateway embeds its key as a path segment
- * (`/api/<key>/subgraphs/id/<id>`), so a URL alone would leak it. The Graph
- * keys are 32 hex characters, which rules out a generic "any hex run" rule
- * (that would mangle pool addresses), so they are matched positionally.
+ * `src/core/logger.ts` applies this to *both* the message and the serialised
+ * `fields`, so a URL or secret passed as a structured field is covered too.
+ *
+ * API keys hide in several places and all of them are matched:
+ *   - a 32-byte hex private key (`0x…`, 64 hex chars)
+ *   - a path segment: the subgraph gateway uses `/api/<key>/…`, and providers
+ *     such as Alchemy use `/v2/<key>` -- 20+ hex or 24+ url-safe chars after a
+ *     known version prefix.
+ *   - a `?apikey=`/`token=` style query parameter
+ *   - an `Authorization: Bearer …` header
+ *
+ * The path rule is deliberately length-bounded: a bare "any hex run" rule
+ * would mangle pool addresses, so short path segments (e.g. `v2/tokens`) are
+ * left alone.
  */
 export function redact(value: string): string {
   return value
-    .replace(/0x[0-9a-fA-F]{64}/g, '0x<redacted-64>')
-    .replace(/\/(api|v1\/api)\/([0-9a-fA-F]{32})(\/|$)/g, '/$1/<redacted-graph-key>$3')
+    .replace(/0x[0-9a-fA-F]{64}\b/g, '0x<redacted-64>')
+    .replace(
+      /\/(api|v1\/api|v2|v3)\/([0-9a-fA-F]{20,}|[A-Za-z0-9_-]{24,})(?=[^A-Za-z0-9_-]|$)/g,
+      '/$1/<redacted-key>',
+    )
     .replace(/([?&](?:api[-_]?key|token|access[-_]?token|deploy[-_]?key)=)[^&\s]+/gi, '$1<redacted>')
     .replace(/\b(Authorization:\s*Bearer\s+)\S+/gi, '$1<redacted>');
 }
