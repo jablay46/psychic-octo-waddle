@@ -22,7 +22,7 @@ import {
 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { base } from 'viem/chains';
-import { BASE_DEXES } from '../config/dexes.js';
+import { BASE_DEXES, routerForPool } from '../config/dexes.js';
 import type { Settings } from '../config/env.js';
 import { log } from '../core/logger.js';
 import type { Opportunity, TradedLeg } from './evaluate.js';
@@ -42,7 +42,7 @@ const MAX_UINT256 = (1n << 256n) - 1n;
 const VENUES = new Map(
   BASE_DEXES.filter((d) => d.router).map((d) => [
     d.id,
-    { router: d.router as Address, kind: venueKindOf(d.kind), factory: d.factory },
+    { router: d.router as Address, kind: venueKindOf(d.kind), factory: d.factory, dex: d },
   ]),
 );
 
@@ -124,6 +124,20 @@ export function toContractLeg(leg: TradedLeg, slippageBps: number, amountIn: big
     throw new UnsuitableOpportunityError(`${leg.dexId} shares a singleton router; not executable yet`);
   }
 
+  // A venue with more than one CL deployment binds each router to its own
+  // factory, so the pool decides which router to call. Aerodrome's two
+  // Slipstream factories share tick spacings 1 and 10 but not pools, so using
+  // the wrong router reverts NW9 rather than silently trading the wrong pool.
+  const router = leg.poolFactory
+    ? routerForPool(venue.dex, leg.poolFactory)
+    : venue.router;
+  if (!router) {
+    throw new UnsuitableOpportunityError(
+      `${leg.dexId} pool ${leg.pool} reports factory ${leg.poolFactory ?? 'unknown'}, ` +
+        'which has no registered router',
+    );
+  }
+
   // `zeroForOne` is defined against the pool's token order, so it recovers
   // which side is being sold without needing the pair's symbols.
   const pool = leg.pool as Address;
@@ -131,7 +145,7 @@ export function toContractLeg(leg: TradedLeg, slippageBps: number, amountIn: big
 
   return {
     venue: venue.kind,
-    router: venue.router,
+    router,
     // Aerodrome v2 routes carry the factory; everywhere else this is unused and
     // the pool address is a harmless placeholder.
     pool: venue.kind === VENUE.AerodromeV2 && venue.factory ? venue.factory : pool,

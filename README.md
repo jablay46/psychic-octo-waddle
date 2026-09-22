@@ -155,17 +155,30 @@ single batch with zero failed reads.
 
 ### What live inspection changed in the design
 
-Three things were only discoverable by reading the chain, and each would have
+Five things were only discoverable by reading the chain, and each would have
 been a silent correctness bug:
 
-1. **UniV3 and Slipstream have different `slot0()` return arities.** UniV3
+1. **UniV3 and Slipstream routers are not ABI-compatible.** SwapRouter02's
+   `exactInputSingle` has 7 fields with no `deadline` (`0x04e45aaf`); Slipstream
+   keeps the `deadline` and keys on `int24 tickSpacing`, so its struct is 8
+   fields (`0xa026383e`). Verified against deployed bytecode: each selector is
+   present in its own router and absent from the other. A wrong struct still
+   encodes cleanly — it just misses the selector and reverts `STF`.
+2. **UniV3 and Slipstream have different `slot0()` return arities.** UniV3
    returns 7 words, Slipstream returns 6, and decoding one as the other throws.
    Since `sqrtPriceX96` is the first word in both, the monitor reads that word
    only. One selector, one call per pool.
-2. **Slipstream fees are not the tier in the pool name.** Two pools both
+3. **Slipstream fees are not the tier in the pool name.** Two pools both
    labelled "0.05%" reported 564 and 2703 ppm on chain. `fee()` is read live
    per pool; the registry value is only a fallback for pools lacking it.
-3. **The public HTTP RPC is unusable for this.** A 45-pool metadata load failed
+4. **Aerodrome runs two Slipstream CL factories, and the router is bound to
+   the factory.** The legacy factory serves tick spacings {1,10,50,100} and the
+   new one {1,10,50}; each router reports its own factory and reverts `NW9` for
+   the other's pools. Because both deployments have spacings 1 and 10 over
+   *different* pools, tick spacing cannot pick the router — the pool's
+   `factory()` must. `routerForPool()` does that, and refuses a pool whose
+   factory is unregistered rather than guessing a router that would revert.
+5. **The public HTTP RPC is unusable for this.** A 45-pool metadata load failed
    almost entirely with "over rate limit" at one call per 140ms. Everything now
    reads over the WebSocket, batched, which also gives every pool a price at
    the same block instead of at slightly different heights.
@@ -329,8 +342,9 @@ and liquidity is attributed symmetrically to base and quote sides. There is also
 coverage of the safety-critical `DRY_RUN` parsing: it stays enabled unless the
 value is exactly `false`, so a misspelled value cannot silently arm live trading.
 Executor coverage includes the Venue->router mapping (UniV3 keys on fee,
-Slipstream on tick spacing, Aerodrome v2 on factory + stable flag) and the gas
-ceiling, which must refuse a send above `MAX_GAS_PRICE_GWEI`.
+Slipstream on tick spacing, Aerodrome v2 on factory + stable flag), the
+per-pool Slipstream router choice, and the gas ceiling, which must refuse a send
+above `MAX_GAS_PRICE_GWEI`.
 
 The live test is deliberately not a mock. It calls a public API and Base RPC for
 real, so a change in the API response shape or a moved factory address fails the

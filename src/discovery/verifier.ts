@@ -1,6 +1,6 @@
 import { createPublicClient, http } from 'viem';
 import { base } from 'viem/chains';
-import { dexById } from '../config/dexes.js';
+import { dexById, venueFactories } from '../config/dexes.js';
 import type { PoolCandidate } from '../core/types.js';
 import { normaliseAddress } from '../core/types.js';
 import { log } from '../core/logger.js';
@@ -83,14 +83,19 @@ export class PoolVerifier {
       // token0/token1 are not universal (e.g. some V4-style pools); ignore.
     }
 
-    if (dex.factory) {
+    const factories = venueFactories(dex);
+    if (factories.length > 0) {
       try {
         const f = await this.client.readContract({
           address: pool.address,
           abi: POOL_ABI,
           functionName: 'factory',
         });
-        if (normaliseAddress(f) !== normaliseAddress(dex.factory)) {
+        // A venue may run several deployments (Aerodrome has two Slipstream
+        // factories); a pool belongs to exactly one of them. Accept any listed
+        // factory, but reject one that is on no list.
+        const known = factories.map((a) => normaliseAddress(a));
+        if (!known.includes(normaliseAddress(f))) {
           return { pool, ok: false, reason: `factory mismatch (${f})` };
         }
       } catch {

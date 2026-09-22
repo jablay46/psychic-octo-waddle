@@ -3,6 +3,7 @@ import type { PoolCandidate } from '../core/types.js';
 import type { PoolMeta } from './amm.js';
 import { decodeAddress, decodeString, decodeWord, type ChainRpc } from '../core/wsrpc.js';
 import { log } from '../core/logger.js';
+import { dexById, venueFactories, type DexConfig } from '../config/dexes.js';
 
 /**
  * Loads pool metadata once per pool, over batched WebSocket reads.
@@ -26,6 +27,9 @@ export const SEL = {
   // Slipstream's swap selector. Slipstream pools expose fee() too, but the
   // swap call takes spacing, so both are read.
   tickSpacing: toFunctionSelector('function tickSpacing() view returns (int24)'),
+  // The pool's deploying factory. Selects the router on venues with more than
+  // one CL deployment (Aerodrome runs two Slipstream factories).
+  factory: toFunctionSelector('function factory() view returns (address)'),
   symbol: toFunctionSelector('function symbol() view returns (string)'),
   decimals: toFunctionSelector('function decimals() view returns (uint8)'),
   getReserves: toFunctionSelector('function getReserves() view returns (uint112,uint112,uint32)'),
@@ -118,6 +122,7 @@ export class PoolMetadataLoader {
       fee: number;
       stable: number | null;
       tickSpacing: number | null;
+      factory: number | null;
     }> = [];
 
     for (const c of fresh) {
@@ -140,7 +145,15 @@ export class PoolMetadataLoader {
           params: [{ to: c.address, data: SEL.tickSpacing }, 'latest'],
         });
       }
-      layout.push({ pool: c, t0, t1, fee, stable, tickSpacing });
+      // A venue with several CL deployments routes by the pool's own factory,
+      // so read it. Single-factory venues do not need the extra call.
+      const factory = venueFactories(dexById(c.dexId) ?? ({} as DexConfig)).length > 1
+        ? calls.length
+        : null;
+      if (factory !== null) {
+        calls.push({ method: 'eth_call', params: [{ to: c.address, data: SEL.factory }, 'latest'] });
+      }
+      layout.push({ pool: c, t0, t1, fee, stable, tickSpacing, factory });
     }
 
     const results = await this.rpc.batch<string>(calls);
@@ -153,6 +166,7 @@ export class PoolMetadataLoader {
       feePpm: number;
       stable: boolean;
       tickSpacing: number;
+      factory?: `0x${string}`;
     }> = [];
 
     for (const entry of layout) {
@@ -187,9 +201,17 @@ export class PoolMetadataLoader {
             tickSpacing = Number(BigInt.asIntN(24, decodeWord(ts.value)));
           }
         }
+        let factory: `0x${string}` | undefined;
+        if (entry.factory !== null) {
+          const f = results[entry.factory];
+          if (f?.status === 'fulfilled' && f.value && f.value !== '0x') {
+            const decoded = decodeAddress(f.value);
+            if (decoded !== '0x0000000000000000000000000000000000000000') factory = decoded;
+          }
+        }
         tokenAddresses.add(t0.toLowerCase() as `0x${string}`);
         tokenAddresses.add(t1.toLowerCase() as `0x${string}`);
-        resolved.push({ pool: entry.pool, t0, t1, feePpm, stable, tickSpacing });
+        resolved.push({ pool: entry.pool, t0, t1, feePpm, stable, tickSpacing, factory });
       } catch (err) {
         failed.push({
           pool: entry.pool.address,
@@ -216,6 +238,7 @@ export class PoolMetadataLoader {
         constantProduct: r.pool.poolModel === 'constant-product',
         stable: r.stable,
         tickSpacing: r.tickSpacing,
+        factory: r.factory,
       };
       const entry: LoadedPool = { meta, candidate: r.pool };
       this.poolCache.set(r.pool.address.toLowerCase(), entry);
