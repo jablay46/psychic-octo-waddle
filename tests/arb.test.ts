@@ -3,6 +3,14 @@ import type { PoolPrice, Snapshot } from '../src/monitor/monitor.js';
 import type { RawPoolState } from '../src/monitor/amm.js';
 import { buildEdges, enumerateCycles, RATE_SCALE, isMidPriceProfitable } from '../src/arb/graph.js';
 import { findOpportunities, findDislocations, type CostModel } from '../src/arb/evaluate.js';
+import {
+  constantProductOut,
+  constantProductPrice,
+  midPriceOf,
+  priceToNumber,
+  quoteSwap,
+  type PoolMeta,
+} from '../src/monitor/amm.js';
 
 /**
  * These tests construct pools by hand so the expected profit can be reasoned
@@ -13,6 +21,7 @@ import { findOpportunities, findDislocations, type CostModel } from '../src/arb/
 
 const WETH = '0x4200000000000000000000000000000000000006';
 const USDC = '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913';
+const USDT = '0xfde4c96c8593536e31f229ea8f37b2ada2699bb2';
 
 function cpPool(
   address: string,
@@ -44,6 +53,48 @@ function cpPool(
 }
 
 const makePool = cpPool;
+
+/**
+ * Builds a stable (Aerodrome v2) PoolPrice for a token pair, pricing it with
+ * the real curve. Fixtures on the stable path must be self-consistent: a
+ * hardcoded ratio price is exactly the bug these tests guard against.
+ */
+function stablePool(
+  address: string,
+  token0: PoolPrice['token0'],
+  token1: PoolPrice['token1'],
+  reserve0: bigint,
+  reserve1: bigint,
+  feePpm: number,
+): PoolPrice {
+  const state: RawPoolState = { kind: 'constant-product', reserve0, reserve1 };
+  const meta: PoolMeta = {
+    address: address as `0x${string}`,
+    dexId: 'aerodrome-v2',
+    token0: { address: token0.address as `0x${string}`, symbol: token0.symbol, decimals: token0.decimals },
+    token1: { address: token1.address as `0x${string}`, symbol: token1.symbol, decimals: token1.decimals },
+    feePpm,
+    constantProduct: true,
+    stable: true,
+    tickSpacing: 0,
+  };
+  const price = midPriceOf(state, meta);
+  return {
+    pool: address,
+    dexId: 'aerodrome-v2',
+    pair: `${token0.symbol}/${token1.symbol}`,
+    tickSpacing: 0,
+    stable: true,
+    feePpm,
+    price,
+    priceNumber: Number(price) / 1e12,
+    state,
+    token0,
+    token1,
+    block: 1,
+    readAt: Date.now(),
+  };
+}
 
 function snapshot(pools: PoolPrice[]): Snapshot {
   const prices = new Map<string, PoolPrice>();
@@ -217,16 +268,99 @@ describe('stable-flag propagation', () => {
   it('carries an Aerodrome v2 pool\'s stable flag through a simulated leg', () => {
     // The scanner reads `stable()` from the pool during metadata load. If it is
     // dropped, the executor routes the swap as volatile and the router resolves
-    // the wrong pool. The flag has to survive PoolPrice -> buildIndex -> leg.
-    const stablePool = { ...makePool('0xccc', 'aerodrome-v2', 1000n * 10n ** 18n, 2_704_000n * 10n ** 6n, 100), stable: true };
-    const snap = snapshot([
-      makePool('0xaaa', 'uniswap-v2', 1000n * 10n ** 18n, 2_600_000n * 10n ** 6n, 3000),
-      stablePool,
-    ]);
+    // the wrong pool -- a different pool, or none. The flag has to survive
+    // PoolPrice -> buildIndex -> leg.
+    //
+    // A stable USDC/USDT pool at a 3x imbalance prices at ~1.286 (not 3), which
+    // is a real dislocation against a constant-product pool at 1.4, so an
+    // Aerodrome leg is actually built and its flag can be checked.
+    const aero = stablePool(
+      '0xccc',
+      { address: USDC, symbol: 'USDC', decimals: 6 },
+      { address: USDT, symbol: 'USDT', decimals: 6 },
+      1_000_000n * 10n ** 6n,
+      3_000_000n * 10n ** 6n,
+      100,
+    );
+    expect(aero.priceNumber).toBeCloseTo(1.2857, 3);
+    const cp: PoolPrice = {
+      ...makePool('0xaaa', 'uniswap-v2', 1_000_000n * 10n ** 6n, 1_400_000n * 10n ** 6n, 3000),
+      pair: 'USDC/USDT',
+      token0: { address: USDC, symbol: 'USDC', decimals: 6 },
+      token1: { address: USDT, symbol: 'USDT', decimals: 6 },
+      price: (1_400_000n * 10n ** 12n) / 1_000_000n,
+      priceNumber: 1.4,
+    };
+    const snap = snapshot([cp, aero]);
     const { opportunities } = findOpportunities(snap, cost(), { maxTradeUsd: 100_000 });
     const legs = opportunities.flatMap((o) => o.legs);
     const aeroLeg = legs.find((l) => l.dexId === 'aerodrome-v2');
     expect(aeroLeg).toBeDefined();
     expect(aeroLeg!.stable).toBe(true);
+  });
+});
+
+describe('stable pools use the StableSwap curve, not x*y=k (bug #1)', () => {
+  const D6 = 10n ** 6n;
+  // A real Base Aerodrome USDC/USDT stable pool, read live: token0=USDC(6),
+  // token1=USDT(6), fee 500 ppm (0.05%).
+  const R0 = 3_883_598_519n;
+  const R1 = 4_173_124_261n;
+
+  function stableMeta(): PoolMeta {
+    return {
+      address: '0x96508ae8037c6bd16162620187691f1c1e3e07c1',
+      dexId: 'aerodrome-v2',
+      token0: { address: USDC, symbol: 'USDC', decimals: 6 },
+      token1: { address: USDT, symbol: 'USDT', decimals: 6 },
+      feePpm: 500,
+      constantProduct: true,
+      stable: true,
+      tickSpacing: 0,
+    };
+  }
+
+  it('rejects the x*y=k price: the reserve ratio is not the stable mid price', () => {
+    // The old code called constantProductPrice for every Aerodrome v2 pool,
+    // stable or not. On this almost-balanced pool that reports ~1.0746 (the raw
+    // imbalance). The real curve's marginal price for these reserves is ~1.0001,
+    // so the buggy path is off by ~7% -- far outside any profitable band.
+    const ratio = priceToNumber(constantProductPrice(R0, R1, stableMeta()));
+    const curve = priceToNumber(midPriceOf({ kind: 'constant-product', reserve0: R0, reserve1: R1 }, stableMeta()));
+    expect(ratio).toBeCloseTo(1.0746, 3);
+    expect(curve).toBeCloseTo(1.0001, 3);
+    expect(Math.abs(curve / ratio - 1)).toBeGreaterThan(0.05);
+  });
+
+  it('uses the stable curve for a live mixed-decimal AERO/USDC pool', () => {
+    // token0=USDC(6), token1=AERO(18), fee 2%. Reserves are the live pool's;
+    // the expected amount is the contract's own getAmountOut() (see
+    // tests/amm.test.ts). The old ratio path would have claimed AERO at a
+    // meaningless ~3.6e12 per USDC; the real marginal is ~1.45.
+    const meta: PoolMeta = {
+      ...stableMeta(),
+      token0: { address: USDC, symbol: 'USDC', decimals: 6 },
+      token1: { address: '0x940181a94a35a4569e4529a3cdfb74e38fd98631', symbol: 'AERO', decimals: 18 },
+      feePpm: 20_000,
+    };
+    const state: RawPoolState = { kind: 'constant-product', reserve0: 4_342_258_657n, reserve1: 15_706_898_228_710_900_520_821n };
+    const quote = quoteSwap(state, meta, 1_000_000_000_000_000n, true);
+    expect(quote.amountOut).toBe(15_706_898_228_710_881_277_154n);
+    const curve = priceToNumber(quote.midPrice);
+    expect(curve).toBeCloseTo(1.4454, 2);
+    // The constant-product ratio of these reserves is ~3.62, a 2.5x error that
+    // the stable curve exists to avoid.
+    const ratio = priceToNumber(constantProductPrice(state.reserve0, state.reserve1, meta));
+    expect(ratio).toBeCloseTo(3.617, 2);
+    expect(Math.abs(ratio / curve - 1)).toBeGreaterThan(1);
+  });
+
+  it('does not change constant-product pricing for non-stable pools', () => {
+    const meta: PoolMeta = { ...stableMeta(), stable: false, feePpm: 3000 };
+    const state: RawPoolState = { kind: 'constant-product', reserve0: R0, reserve1: R1 };
+    expect(midPriceOf(state, meta)).toBe(constantProductPrice(R0, R1, meta));
+    expect(quoteSwap(state, meta, 1_000_000n, true).amountOut).toBe(
+      constantProductOut(1_000_000n, R0, R1, 3000),
+    );
   });
 });

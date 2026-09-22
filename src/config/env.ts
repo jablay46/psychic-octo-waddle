@@ -51,7 +51,9 @@ const schema = z.object({
   /**
    * The Graph gateway API key. Primary discovery source; without it the
    * subgraph leg is skipped and discovery falls back to DexScreener alone.
-   * Never logged -- `redact` strips it from any URL that reaches a log line.
+   * Never logged -- `redact` strips it from any URL that reaches a log line,
+   * and the logger applies `redact` to both the message and the serialised
+   * `fields`, so a key cannot leak through a structured field either.
    */
   GRAPH_API_KEY: z.string().optional(),
   /** Pages of 1000 pools to pull per venue from each subgraph. */
@@ -171,15 +173,28 @@ export function resetSettingsCache(): void {
 /**
  * Redacts anything key-shaped before it can reach a log line.
  *
- * The subgraph gateway embeds its key as a path segment
- * (`/api/<key>/subgraphs/id/<id>`), so a URL alone would leak it. The Graph
- * keys are 32 hex characters, which rules out a generic "any hex run" rule
- * (that would mangle pool addresses), so they are matched positionally.
+ * `src/core/logger.ts` applies this to *both* the message and the serialised
+ * `fields`, so a URL or secret passed as a structured field is covered too.
+ *
+ * API keys hide in several places and all of them are matched:
+ *   - a 32-byte hex private key (`0x…`, 64 hex chars)
+ *   - a path segment: the subgraph gateway uses `/api/<key>/…`, and providers
+ *     such as Alchemy use `/v2/<key>` -- 20+ hex or 24+ url-safe chars after a
+ *     known version prefix.
+ *   - a `?apikey=`/`token=` style query parameter
+ *   - an `Authorization: Bearer …` header
+ *
+ * The path rule is deliberately length-bounded: a bare "any hex run" rule
+ * would mangle pool addresses, so short path segments (e.g. `v2/tokens`) are
+ * left alone.
  */
 export function redact(value: string): string {
   return value
-    .replace(/0x[0-9a-fA-F]{64}/g, '0x<redacted-64>')
-    .replace(/\/(api|v1\/api)\/([0-9a-fA-F]{32})(\/|$)/g, '/$1/<redacted-graph-key>$3')
+    .replace(/0x[0-9a-fA-F]{64}\b/g, '0x<redacted-64>')
+    .replace(
+      /\/(api|v1\/api|v2|v3)\/([0-9a-fA-F]{20,}|[A-Za-z0-9_-]{24,})(?=[^A-Za-z0-9_-]|$)/g,
+      '/$1/<redacted-key>',
+    )
     .replace(/([?&](?:api[-_]?key|token|access[-_]?token|deploy[-_]?key)=)[^&\s]+/gi, '$1<redacted>')
     .replace(/\b(Authorization:\s*Bearer\s+)\S+/gi, '$1<redacted>');
 }
