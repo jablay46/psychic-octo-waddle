@@ -203,7 +203,7 @@ describe('buildRequest', () => {
 describe('gas ceiling', () => {
   const request = buildRequest(opportunity([leg()]), settings);
 
-  function client(gasPriceWei: bigint, settingsOverride = settings) {
+  function client(gasPriceWei: bigint, settingsOverride = settings, gasEstimate = 300_000n) {
     // The submit path is the only code that must honour the ceiling. The
     // public client is stubbed at the two calls the path makes (gas price and
     // the write); the wallet client only records what it was asked to send.
@@ -211,7 +211,7 @@ describe('gas ceiling', () => {
     const publicClient = {
       getGasPrice: async () => gasPriceWei,
       simulateContract: async () => ({ result: undefined }),
-      estimateContractGas: async () => 300_000n,
+      estimateContractGas: async () => gasEstimate,
     };
     const walletClient = {
       getAddresses: async () => ['0x00000000000000000000000000000000000000AA'],
@@ -240,6 +240,85 @@ describe('gas ceiling', () => {
   it('submits at or below the ceiling', async () => {
     const ceilingWei = BigInt(settings.MAX_GAS_PRICE_GWEI) * 1_000_000_000n;
     const { c, sent } = client(ceilingWei);
+    const result = await c.execute(request);
+    expect(result.submitted).toBe(true);
+    expect(sent).toHaveLength(1);
+  });
+});
+
+describe('gas estimate drift', () => {
+  const request = buildRequest(opportunity([leg()]), settings);
+  const budgeted = BigInt(settings.ESTIMATED_GAS_UNITS);
+
+  function client(gasEstimate: bigint, settingsOverride = settings) {
+    const sent: unknown[] = [];
+    const publicClient = {
+      getGasPrice: async () => 1n,
+      simulateContract: async () => ({ result: undefined }),
+      estimateContractGas: async () => gasEstimate,
+    };
+    const walletClient = {
+      getAddresses: async () => ['0x00000000000000000000000000000000000000AA'],
+      writeContract: async (args: unknown) => {
+        sent.push(args);
+        return '0xtx';
+      },
+    };
+    const c = new FlashloanExecutorClient({
+      settings: { ...settingsOverride, DRY_RUN: false },
+      publicClient: publicClient as never,
+      walletClient: walletClient as never,
+    });
+    return { c, sent };
+  }
+
+  it('refuses when the dry-run estimate blows past the gas budget', async () => {
+    // The scan sized the floor from ESTIMATED_GAS_UNITS, so an estimate well
+    // above it means the cost model was wrong for this request.
+    const { c, sent } = client(budgeted * 2n);
+    const result = await c.execute(request);
+    expect(result.submitted).toBe(false);
+    expect(result.error).toMatch(/ESTIMATED_GAS_UNITS/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('allows an estimate within the drift tolerance', async () => {
+    const { c, sent } = client(budgeted + budgeted / 10n); // +10%, default tolerance 20%
+    const result = await c.execute(request);
+    expect(result.submitted).toBe(true);
+    expect(sent).toHaveLength(1);
+  });
+
+  it('honours a tightened drift tolerance from config', async () => {
+    const { c, sent } = client(budgeted + budgeted / 10n, {
+      ...settings,
+      MAX_GAS_ESTIMATE_DRIFT_BPS: 0,
+    });
+    const result = await c.execute(request);
+    expect(result.submitted).toBe(false);
+    expect(sent).toHaveLength(0);
+  });
+
+  it('sends when the simulation exposes no gas estimate', async () => {
+    // An unavailable estimate must not be read as "over budget".
+    const sent: unknown[] = [];
+    const publicClient = {
+      getGasPrice: async () => 1n,
+      simulateContract: async () => ({ result: undefined }),
+      estimateContractGas: async () => undefined,
+    };
+    const walletClient = {
+      getAddresses: async () => ['0x00000000000000000000000000000000000000AA'],
+      writeContract: async (args: unknown) => {
+        sent.push(args);
+        return '0xtx';
+      },
+    };
+    const c = new FlashloanExecutorClient({
+      settings: { ...settings, DRY_RUN: false },
+      publicClient: publicClient as never,
+      walletClient: walletClient as never,
+    });
     const result = await c.execute(request);
     expect(result.submitted).toBe(true);
     expect(sent).toHaveLength(1);

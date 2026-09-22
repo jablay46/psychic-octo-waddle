@@ -97,6 +97,14 @@ const schema = z.object({
   FLASHLOAN_FEE_BPS: num(5),
   /** Gas units budgeted for borrow -> swap -> swap -> repay. */
   ESTIMATED_GAS_UNITS: num(400_000).pipe(z.number().int().positive()),
+  /**
+   * Slack above `ESTIMATED_GAS_UNITS` that the submit path tolerates before it
+   * refuses to send, in bps. The scan budgets a fixed number of gas units;
+   * if the dry-run gas estimate comes in materially higher, the scan's cost
+   * model understated gas and its profit figure cannot be trusted for that
+   * request. Default 2000 = refuse above 1.2x the estimate.
+   */
+  MAX_GAS_ESTIMATE_DRIFT_BPS: num(2_000).pipe(z.number().int().min(0)),
 
   // --- flashloan providers ------------------------------------------------
   ENABLE_BALANCER: boolFromEnv(true),
